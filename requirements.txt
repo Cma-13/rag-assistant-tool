@@ -44,6 +44,7 @@ Pygments==2.21.0
 pymupdf==1.28.2
 pytesseract==0.3.13
 python-dotenv==1.2.3
+python-multipart==0.0.32
 PyYAML==6.0.3
 regex==2026.9.10
 requests==2.34.2
