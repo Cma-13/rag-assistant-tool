@@ -104,8 +104,8 @@ def retrieve_chunks(query, top_k=3, source_file=None):
 def generate_answer(query, retrieved_chunks):
     context = "\n\n".join([chunk_text for (_, _, chunk_text, _) in retrieved_chunks])
     prompt = f"""You are a helpful assistant answering questions based only on the provided context.
-If the answer isn't in the context, say you don't know - do not make up information.
-IMPORTANT: Respond in the SAME language as the question. If the question is in Nepali, respond in Nepali (not Hindi). If the question is in English, respond in English.
+    If the answer isn't in the context, respond with "I don't know" (in English) or "मलाई थाहा छैन" (in Nepali) — matching the question's language. Never respond in Hindi under any circumstance.
+    IMPORTANT: Always respond in the SAME language as the question — English question gets English answer, Nepali question gets Nepali answer. Never use Hindi.
 
 Context:
 {context}
