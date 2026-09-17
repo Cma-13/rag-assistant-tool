@@ -4,6 +4,7 @@ from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 from pipeline import ocr_pdf, chunk_text, embed_chunks, store_chunks, retrieve_chunks, generate_answer
 from fastapi.middleware.cors import CORSMiddleware
+from pipeline import agent_query
 
 app = FastAPI()
 
@@ -45,15 +46,15 @@ async def upload_document(file: UploadFile = File(...)):
 
 class QueryRequest(BaseModel):
     question: str
+    source_file: str | None = None
 
 
 @app.post("/query")
 def query_documents(request: QueryRequest):
-    results = retrieve_chunks(request.question)
-    answer = generate_answer(request.question, results)
-
+    result = agent_query(request.question, source_file=request.source_file)
     return {
         "question": request.question,
-        "answer": answer,
-        "sources": [source_file for (_, source_file, _, _) in results]
+        "answer": result["answer"],
+        "sources": result["sources"],
+        "action_taken": result["action_taken"]
     }
