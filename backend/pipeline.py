@@ -68,7 +68,7 @@ def store_chunks(source_file, chunks, embeddings):
     conn.close()
 
 
-def retrieve_chunks(query, top_k=3, source_file=None):
+def retrieve_chunks(query, top_k=5, source_file=None):
     query_embedding = model.encode(f"query: {query}").tolist()
     conn = get_connection()
     cur = conn.cursor()
