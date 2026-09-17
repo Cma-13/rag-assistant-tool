@@ -4,6 +4,7 @@ backend/*.pyc
 backend/.env 
 backend/cleaned_output.txt 
 backend/debug_retrieve.py
+backend/*.pdf
 frontend/node_modules/ 
 frontend/.next/ 
 frontend/.env.local 
