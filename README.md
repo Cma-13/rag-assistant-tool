@@ -92,7 +92,7 @@ multilingual-rag-assistant/
 │   ├── requirements.txt
 │   └── .env              # Database credentials 
 └── frontend/
-    └── src/app/page.tsx  # Chat interface
+    └── app/page.tsx  # Chat interface
 ```
 
 ---
