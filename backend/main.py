@@ -24,24 +24,26 @@ def read_root():
 
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
-    # Save the uploaded file temporarily
+    from pipeline import get_connection
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM document_chunks WHERE source_file = %s", (file.filename,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
     temp_path = f"temp_{file.filename}"
     with open(temp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # Run the full ingestion pipeline
     text = ocr_pdf(temp_path)
     chunks = chunk_text(text)
     embeddings = embed_chunks(chunks)
     store_chunks(file.filename, chunks, embeddings)
 
-    # Clean up the temp file
     os.remove(temp_path)
 
-    return {
-        "filename": file.filename,
-        "chunks_stored": len(chunks)
-    }
+    return {"filename": file.filename, "chunks_stored": len(chunks)}
 
 
 class QueryRequest(BaseModel):
