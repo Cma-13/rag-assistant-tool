@@ -236,7 +236,7 @@ def agent_query(query, source_file=None):
 
     elif action == "SUMMARY":
         if not source_file:
-            answer = "Please upload or select a document first."
+            answer = "Please tell me which document you'd like summarized."
         else:
             answer = generate_summary(source_file)
         return {"answer": answer, "sources": [source_file] if source_file else [], "action_taken": "SUMMARY"}
@@ -250,13 +250,12 @@ def agent_query(query, source_file=None):
         return {"answer": response['response'], "sources": [], "action_taken": "CHAT"}
 
     else:  # SEARCH
-        # FIX: brought top_k back down from 7 to 5 — for narrative content,
-        # more chunks increased the chance of the model conflating unrelated events.
+        # source_file=None means search the ENTIRE knowledge base, not one document
         results = retrieve_chunks(query, top_k=5, source_file=source_file)
 
         if not results:
             return {
-                "answer": "I don't know this doesn't appear to be covered in the uploaded document.",
+                "answer": "I don't know — this doesn't appear to be covered in the knowledge base.",
                 "sources": [],
                 "action_taken": "SEARCH_NO_MATCH"
             }
@@ -276,11 +275,12 @@ def agent_query(query, source_file=None):
 
         if not is_relevant:
             return {
-                "answer": "I don't know this doesn't appear to be covered in the uploaded document.",
+                "answer": "I don't know — this doesn't appear to be covered in the knowledge base.",
                 "sources": [],
                 "action_taken": "SEARCH_NO_MATCH"
             }
 
         answer = generate_answer(query, results)
-        sources = [source_file for (_, source_file, _, _) in results]
+        # Collect UNIQUE source documents this answer actually drew from
+        sources = list(dict.fromkeys([source_file for (_, source_file, _, _) in results]))
         return {"answer": answer, "sources": sources, "action_taken": "SEARCH"}
