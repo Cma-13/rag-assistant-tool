@@ -10,7 +10,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # your Next.js dev server
+    allow_origins=["http://localhost:3000"],  # Next.js dev server
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,7 +48,7 @@ async def upload_document(file: UploadFile = File(...)):
 
 class QueryRequest(BaseModel):
     question: str
-    source_file: str | None = None
+    source_file: str | None = None  # optional — omit to search the whole knowledge base
 
 
 @app.post("/query")
