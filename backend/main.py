@@ -97,3 +97,8 @@ def query_documents(request: QueryRequest):
         "sources": result["sources"],
         "action_taken": result["action_taken"]
     }
+    
+@app.get("/documents")
+def get_documents():
+    from pipeline import list_documents
+    return {"documents": list_documents()}
