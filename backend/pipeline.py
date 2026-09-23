@@ -52,16 +52,16 @@ def embed_chunks(chunks):
     return model.encode(prefixed_chunks)
 
 
-def store_chunks(source_file, chunks, embeddings):
+def store_chunks(source_file, chunks, embeddings, content_hash=None):
     conn = get_connection()
     cur = conn.cursor()
     for chunk, embedding in zip(chunks, embeddings):
         cur.execute(
             """
-            INSERT INTO document_chunks (source_file, chunk_text, embedding)
-            VALUES (%s, %s, %s)
+            INSERT INTO document_chunks (source_file, chunk_text, embedding, content_hash)
+            VALUES (%s, %s, %s, %s)
             """,
-            (source_file, chunk, embedding.tolist())
+            (source_file, chunk, embedding.tolist(), content_hash)
         )
     conn.commit()
     cur.close()
