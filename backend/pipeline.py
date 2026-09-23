@@ -26,7 +26,7 @@ def get_connection():
     )
 
 
-def ocr_pdf(pdf_path, lang="eng+nep"):
+def ocr_pdf(pdf_path, lang="eng"):
     doc = fitz.open(pdf_path)
     full_text = ""
     for page_num, page in enumerate(doc):
@@ -99,7 +99,6 @@ def retrieve_chunks(query, top_k=5, source_file=None):
     cur.close()
     conn.close()
     return results
-
 
 def generate_answer(query, retrieved_chunks):
     # FIX: sort by chunk id to restore original document/narrative order
@@ -255,7 +254,7 @@ def agent_query(query, source_file=None):
 
         if not results:
             return {
-                "answer": "I don't know — this doesn't appear to be covered in the knowledge base.",
+                "answer": "I don't know this doesn't appear to be covered in the knowledge base.",
                 "sources": [],
                 "action_taken": "SEARCH_NO_MATCH"
             }
