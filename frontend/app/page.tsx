@@ -98,6 +98,13 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  useEffect(() => {
+    fetch("http://127.0.0.1:8000/documents")
+      .then((res) => res.json())
+      .then((data) => setUploadedDocs(data.documents ?? []))
+      .catch(() => {});
+  }, []);
+
   const handleSend = async () => {
     if (!input.trim() || loading) return;
 
@@ -130,7 +137,7 @@ export default function Home() {
     }
   };
 
-const processFile = async (file: File) => {
+  const processFile = async (file: File) => {
     if (!file.name.toLowerCase().endsWith(".pdf")) {
       setMessages((prev) => [
         ...prev,
@@ -188,7 +195,6 @@ const processFile = async (file: File) => {
     await processFiles(Array.from(files));
     e.target.value = "";
   };
-
 
   const processFiles = async (files: File[]) => {
     for (let i = 0; i < files.length; i++) {
@@ -384,7 +390,7 @@ const processFile = async (file: File) => {
           <div className="mx-auto max-w-2xl">
             <div
               className={`flex items-center gap-2 rounded-2xl border bg-white px-4 py-2 shadow-sm transition-all duration-150 ${
-                uploadedDocs.length > 0 && !loading
+                uploadedDocs.length > 0
                   ? "border-[#DDD9D0] focus-within:border-[#2D6A6A] focus-within:shadow-[0_0_0_3px_rgba(45,106,106,0.10)]"
                   : "border-[#DDD9D0] opacity-60"
               }`}
@@ -400,21 +406,18 @@ const processFile = async (file: File) => {
                 placeholder={
                   uploading
                     ? "Processing document…"
-                    : uploadedDocs.length > 0
-                      ? "Ask anything about your knowledge base…"
-                      : "Upload a PDF to get started"
+                    : loading
+                      ? "Waiting for the previous answer…"
+                      : uploadedDocs.length > 0
+                        ? "Ask anything about your knowledge base…"
+                        : "Say hi, or upload a PDF to ask about documents…"
                 }
-                disabled={uploadedDocs.length === 0 || loading || uploading}
+                disabled={uploading}
                 className="flex-1 bg-transparent py-1.5 text-[14.5px] text-[#1C1C1E] placeholder-[#B0ABA2] outline-none disabled:cursor-not-allowed"
               />
               <button
                 onClick={handleSend}
-                disabled={
-                  uploadedDocs.length === 0 ||
-                  loading ||
-                  uploading ||
-                  !input.trim()
-                }
+                disabled={uploading || loading || !input.trim()}
                 aria-label="Send message"
                 className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl bg-[#2D6A6A] text-white shadow-sm transition hover:bg-[#255757] active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
               >
