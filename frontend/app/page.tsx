@@ -130,7 +130,7 @@ export default function Home() {
     }
   };
 
-  const processFile = async (file: File) => {
+const processFile = async (file: File) => {
     if (!file.name.toLowerCase().endsWith(".pdf")) {
       setMessages((prev) => [
         ...prev,
@@ -151,14 +151,27 @@ export default function Home() {
         body: formData,
       });
       const data = await res.json();
-      setUploadedDocs((prev) => [...new Set([...prev, data.filename])]);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: `Added "${data.filename}" to the knowledge base.`,
-        },
-      ]);
+
+      if (data.chunks_stored === 0) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content:
+              data.message ??
+              `"${file.name}" is already in the knowledge base - skipped.`,
+          },
+        ]);
+      } else {
+        setUploadedDocs((prev) => [...new Set([...prev, data.filename])]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `Added "${data.filename}" to the knowledge base.`,
+          },
+        ]);
+      }
     } catch {
       setMessages((prev) => [
         ...prev,
@@ -175,6 +188,7 @@ export default function Home() {
     await processFiles(Array.from(files));
     e.target.value = "";
   };
+
 
   const processFiles = async (files: File[]) => {
     for (let i = 0; i < files.length; i++) {
