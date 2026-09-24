@@ -228,7 +228,7 @@ def agent_query(query, user_id, source_file=None):
 
     if action != "CHAT" and user_id is None:
         return {
-            "answer": "Please log in or sign up to search, list, or summarize documents. You can still chat with me freely without an account!",
+            "answer": "I don't have general knowledge to draw from yet. I only answer based on documents you upload. Sign up or log in to get started.",
             "sources": [],
             "action_taken": "AUTH_REQUIRED"
         }
