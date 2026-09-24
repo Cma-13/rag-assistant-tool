@@ -311,18 +311,23 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Knowledge base badge */}
+        {/* Uploaded files */}
         {uploadedDocs.length > 0 && (
-          <div className="flex min-w-0 flex-1 items-center justify-center">
-            <div className="flex max-w-xs items-center gap-1.5 rounded-full border border-[#C4DFE0] bg-[#EAF3F3] px-3 py-1">
-              <span className="text-[#2D6A6A] flex-shrink-0">
-                <FileIcon />
-              </span>
-              <span className="truncate text-[11px] font-medium text-[#2D6A6A]">
-                {uploadedDocs.length} document
-                {uploadedDocs.length > 1 ? "s" : ""} in knowledge base
-              </span>
-            </div>
+          <div className="flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-x-auto">
+            {uploadedDocs.map((doc) => (
+              <div
+                key={doc}
+                className="flex flex-shrink-0 items-center gap-1.5 rounded-full border border-[#C4DFE0] bg-[#EAF3F3] px-3 py-1"
+                title={doc}
+              >
+                <span className="text-[#2D6A6A] flex-shrink-0">
+                  <FileIcon />
+                </span>
+                <span className="max-w-[140px] truncate text-[11px] font-medium text-[#2D6A6A]">
+                  {doc}
+                </span>
+              </div>
+            ))}
           </div>
         )}
 
