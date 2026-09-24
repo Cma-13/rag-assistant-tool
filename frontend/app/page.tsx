@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import AuthModal from "./components/AuthModal";
 
 interface Message {
   role: "user" | "assistant";
@@ -94,15 +95,33 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedDocs, setUploadedDocs] = useState<string[]>([]);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [showUserMenu, setShowUserMenu] = useState(false);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
   useEffect(() => {
-    fetch("http://127.0.0.1:8000/documents")
+    if (!token) return;
+    fetch("http://127.0.0.1:8000/documents", {
+      headers: { Authorization: `Bearer ${token}` },
+    })
       .then((res) => res.json())
       .then((data) => setUploadedDocs(data.documents ?? []))
       .catch(() => {});
+  }, [token]);
+
+  useEffect(() => {
+    const savedToken = localStorage.getItem("token");
+    const savedEmail = localStorage.getItem("userEmail");
+    if (savedToken && savedEmail) {
+      setToken(savedToken);
+      setUserEmail(savedEmail);
+    }
   }, []);
 
   const handleSend = async () => {
@@ -114,10 +133,15 @@ export default function Home() {
     setLoading(true);
 
     try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+
       const res = await fetch("http://127.0.0.1:8000/query", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: input }), // no source_file — searches whole knowledge base
+        headers,
+        body: JSON.stringify({ question: input }),
       });
       const data = await res.json();
       setMessages((prev) => [
@@ -137,6 +161,22 @@ export default function Home() {
     }
   };
 
+  const handleAuthSuccess = (newToken: string, email: string) => {
+    localStorage.setItem("token", newToken);
+    localStorage.setItem("userEmail", email);
+    setToken(newToken);
+    setUserEmail(email);
+    setShowAuthModal(false);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    localStorage.removeItem("userEmail");
+    setToken(null);
+    setUserEmail(null);
+    setUploadedDocs([]);
+  };
+
   const processFile = async (file: File) => {
     if (!file.name.toLowerCase().endsWith(".pdf")) {
       setMessages((prev) => [
@@ -153,8 +193,15 @@ export default function Home() {
     formData.append("file", file);
 
     try {
+      if (!token) {
+        setShowAuthModal(true);
+        setUploading(false);
+        return;
+      }
+
       const res = await fetch("http://127.0.0.1:8000/upload", {
         method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
         body: formData,
       });
       const data = await res.json();
@@ -164,9 +211,7 @@ export default function Home() {
           ...prev,
           {
             role: "assistant",
-            content:
-              data.message ??
-              `"${file.name}" is already in the knowledge base - skipped.`,
+            content: `"${file.name}" is already uploaded.`,
           },
         ]);
       } else {
@@ -175,7 +220,7 @@ export default function Home() {
           ...prev,
           {
             role: "assistant",
-            content: `Added "${data.filename}" to the knowledge base.`,
+            content: `Uploaded "${data.filename}"`,
           },
         ]);
       }
@@ -226,7 +271,7 @@ export default function Home() {
           <span key={i}>{part}</span>
         ),
       );
-
+  const userInitial = userEmail ? userEmail[0].toUpperCase() : "U";
   const isEmpty = messages.length === 0;
 
   return (
@@ -302,6 +347,54 @@ export default function Home() {
             </span>
           )}
         </label>
+        {userEmail ? (
+          <div className="relative flex-shrink-0">
+            <button
+              onClick={() => setShowUserMenu((prev) => !prev)}
+              className="flex h-8 w-8 items-center justify-center rounded-full bg-[#2D6A6A] text-[13px] font-semibold text-white shadow-sm"
+              title={userEmail}
+            >
+              {userInitial}
+            </button>
+            {showUserMenu && (
+              <div className="absolute right-0 top-10 z-10 w-48 rounded-xl border border-[#DDD9D0] bg-white py-2 shadow-lg">
+                <p className="truncate px-3 pb-2 text-[12px] text-[#9A968C]">
+                  {userEmail}
+                </p>
+                <button
+                  onClick={() => {
+                    setShowUserMenu(false);
+                    handleLogout();
+                  }}
+                  className="w-full px-3 py-1.5 text-left text-[13px] text-[#1C1C1E] hover:bg-[#F5F3EF]"
+                >
+                  Log out
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="flex flex-shrink-0 items-center gap-2">
+            <button
+              onClick={() => {
+                setAuthMode("login");
+                setShowAuthModal(true);
+              }}
+              className="rounded-xl border border-[#DDD9D0] px-3 py-1.5 text-[13px] font-medium text-[#1C1C1E] hover:bg-[#F5F3EF]"
+            >
+              Log in
+            </button>
+            <button
+              onClick={() => {
+                setAuthMode("signup");
+                setShowAuthModal(true);
+              }}
+              className="rounded-xl bg-[#2D6A6A] px-3 py-1.5 text-[13px] font-medium text-white hover:bg-[#255757]"
+            >
+              Sign up
+            </button>
+          </div>
+        )}
       </header>
 
       {/* ── Messages ──────────────────────────────── */}
@@ -315,10 +408,10 @@ export default function Home() {
                   <BotIcon />
                 </div>
                 <h2 className="mb-1.5 text-base font-semibold text-[#1C1C1E]">
-                  Ready to explore your knowledge base
+                  What&apos;s on the agenda today?
                 </h2>
                 <p className="max-w-xs text-sm leading-relaxed text-[#9A968C]">
-                  Upload one or more PDF documents to get started.
+                  Ask me anything, or upload a PDF to get started.
                 </p>
                 <div className="mt-7 flex flex-wrap justify-center gap-2">
                   {["Context-aware answers", "PDF documents"].map((feat) => (
@@ -359,7 +452,7 @@ export default function Home() {
                 {/* User avatar */}
                 {msg.role === "user" && (
                   <div className="mb-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-[#D8D3C9] text-[#6B6B6B] text-[11px] font-bold">
-                    U
+                    {userInitial}
                   </div>
                 )}
               </div>
@@ -430,6 +523,14 @@ export default function Home() {
           </div>
         </div>
       </main>
+
+      {showAuthModal && (
+        <AuthModal
+          onClose={() => setShowAuthModal(false)}
+          onAuthSuccess={handleAuthSuccess}
+          initialMode={authMode}
+        />
+      )}
     </div>
   );
 }
