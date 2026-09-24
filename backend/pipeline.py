@@ -52,23 +52,23 @@ def embed_chunks(chunks):
     return model.encode(prefixed_chunks)
 
 
-def store_chunks(source_file, chunks, embeddings, content_hash=None):
+def store_chunks(source_file, chunks, embeddings, content_hash, user_id):
     conn = get_connection()
     cur = conn.cursor()
     for chunk, embedding in zip(chunks, embeddings):
         cur.execute(
             """
-            INSERT INTO document_chunks (source_file, chunk_text, embedding, content_hash)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO document_chunks (source_file, chunk_text, embedding, content_hash, user_id)
+            VALUES (%s, %s, %s, %s, %s)
             """,
-            (source_file, chunk, embedding.tolist(), content_hash)
+            (source_file, chunk, embedding.tolist(), content_hash, user_id)
         )
     conn.commit()
     cur.close()
     conn.close()
 
 
-def retrieve_chunks(query, top_k=5, source_file=None):
+def retrieve_chunks(query, user_id, top_k=5, source_file=None):
     query_embedding = model.encode(f"query: {query}").tolist()
     conn = get_connection()
     cur = conn.cursor()
@@ -78,21 +78,22 @@ def retrieve_chunks(query, top_k=5, source_file=None):
             """
             SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
             FROM document_chunks
-            WHERE source_file = %s
+            WHERE source_file = %s AND user_id = %s
             ORDER BY distance ASC
             LIMIT %s
             """,
-            (query_embedding, source_file, top_k)
+            (query_embedding, source_file, user_id, top_k)
         )
     else:
         cur.execute(
             """
             SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
             FROM document_chunks
+            WHERE user_id = %s
             ORDER BY distance ASC
             LIMIT %s
             """,
-            (query_embedding, top_k)
+            (query_embedding, user_id, top_k)
         )
 
     results = cur.fetchall()
@@ -126,28 +127,28 @@ Answer:"""
     return response['response']
 
 
-def list_documents():
+def list_documents(user_id):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT DISTINCT source_file FROM document_chunks;")
+    cur.execute("SELECT DISTINCT source_file FROM document_chunks WHERE user_id = %s;", (user_id,))
     results = cur.fetchall()
     cur.close()
     conn.close()
     return [row[0] for row in results]
 
 
-def get_document_chunks_in_order(source_file, limit=25):
+def get_document_chunks_in_order(source_file, user_id, limit=25):
     """Fetch chunks in original document order, for summarization (not similarity-based)."""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
         """
         SELECT chunk_text FROM document_chunks
-        WHERE source_file = %s
+        WHERE source_file = %s AND user_id = %s
         ORDER BY id ASC
         LIMIT %s
         """,
-        (source_file, limit)
+        (source_file, user_id, limit)
     )
     results = cur.fetchall()
     cur.close()
@@ -155,9 +156,9 @@ def get_document_chunks_in_order(source_file, limit=25):
     return [row[0] for row in results]
 
 
-def generate_summary(source_file):
+def generate_summary(source_file, user_id):
     """Generate a broad summary using chunks spread across the document."""
-    chunks = get_document_chunks_in_order(source_file, limit=25)
+    chunks = get_document_chunks_in_order(source_file, user_id, limit=25)
     if not chunks:
         return "I don't have any content to summarize yet please upload a document first."
 
@@ -222,11 +223,18 @@ Answer:"""
     return "NO" not in decision  # default to relevant unless explicitly told NO
 
 
-def agent_query(query, source_file=None):
+def agent_query(query, user_id, source_file=None):
     action = agent_decide_action(query)
 
+    if action != "CHAT" and user_id is None:
+        return {
+            "answer": "Please log in or sign up to search, list, or summarize documents. You can still chat with me freely without an account!",
+            "sources": [],
+            "action_taken": "AUTH_REQUIRED"
+        }
+
     if action == "LIST":
-        docs = list_documents()
+        docs = list_documents(user_id)
         if docs:
             answer = "Here are the documents you've uploaded: " + ", ".join(docs)
         else:
@@ -237,7 +245,7 @@ def agent_query(query, source_file=None):
         if not source_file:
             answer = "Please tell me which document you'd like summarized."
         else:
-            answer = generate_summary(source_file)
+            answer = generate_summary(source_file, user_id)
         return {"answer": answer, "sources": [source_file] if source_file else [], "action_taken": "SUMMARY"}
 
     elif action == "CHAT":
@@ -249,12 +257,11 @@ def agent_query(query, source_file=None):
         return {"answer": response['response'], "sources": [], "action_taken": "CHAT"}
 
     else:  # SEARCH
-        # source_file=None means search the ENTIRE knowledge base, not one document
-        results = retrieve_chunks(query, top_k=5, source_file=source_file)
+        results = retrieve_chunks(query, user_id, top_k=5, source_file=source_file)
 
         if not results:
             return {
-                "answer": "I don't know this doesn't appear to be covered in the knowledge base.",
+                "answer": "I don't know — this doesn't appear to be covered in the knowledge base.",
                 "sources": [],
                 "action_taken": "SEARCH_NO_MATCH"
             }
@@ -280,6 +287,5 @@ def agent_query(query, source_file=None):
             }
 
         answer = generate_answer(query, results)
-        # Collect UNIQUE source documents this answer actually drew from
         sources = list(dict.fromkeys([source_file for (_, source_file, _, _) in results]))
         return {"answer": answer, "sources": sources, "action_taken": "SEARCH"}
