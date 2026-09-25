@@ -133,15 +133,26 @@ export default function Home() {
     setLoading(true);
 
     try {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
+
+      // Build recent history from the last few exchanges (question/answer pairs)
+      // so the backend can resolve follow-ups like "that" or "the second one".
+      const recentHistory: { question: string; answer: string }[] = [];
+      for (let i = 0; i < messages.length - 1; i++) {
+        if (messages[i].role === "user" && messages[i + 1]?.role === "assistant") {
+          recentHistory.push({
+            question: messages[i].content,
+            answer: messages[i + 1].content,
+          });
+        }
+      }
+      const lastFewTurns = recentHistory.slice(-4);
 
       const res = await fetch("http://127.0.0.1:8000/query", {
         method: "POST",
         headers,
-        body: JSON.stringify({ question: input }),
+        body: JSON.stringify({ question: input, history: lastFewTurns }),
       });
       const data = await res.json();
       setMessages((prev) => [
