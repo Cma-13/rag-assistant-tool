@@ -1,12 +1,14 @@
 fastapi==0.141.1
-uvicorn
-python-multipart
 langchain_text_splitters==1.1.2
 ollama==0.6.2
+passlib==1.7.4
 Pillow==12.3.0
 psycopg2_binary==2.9.12
 pydantic==2.13.5
 pymupdf==1.28.2
 pytesseract==0.3.13
 python-dotenv==1.2.3
+python_jose==3.5.0
 sentence_transformers==6.1.0
+bcrypt==4.0.1
+uvicorn==0.53.0
