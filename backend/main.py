@@ -165,12 +165,12 @@ async def upload_document(file: UploadFile = File(...), current_user: dict = Dep
 class QueryRequest(BaseModel):
     question: str
     source_file: str | None = None  # optional — omit to search the whole knowledge base
-
+    history: list[dict] | None = None  # recent [{"question":..., "answer":...}, ...] for follow-ups
 
 @app.post("/query")
 def query_documents(request: QueryRequest, current_user: dict | None = Depends(get_optional_user)):
     user_id = current_user["user_id"] if current_user else None
-    result = agent_query(request.question, user_id, source_file=request.source_file)
+    result = agent_query(request.question, user_id, source_file=request.source_file, history=request.history)
     return {
         "question": request.question,
         "answer": result["answer"],

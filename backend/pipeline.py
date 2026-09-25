@@ -222,9 +222,66 @@ Answer:"""
     decision = response['response'].strip().upper()
     return "NO" not in decision  # default to relevant unless explicitly told NO
 
+# Messages this short/simple are almost never a follow-up needing rewriting,
+# and sending them through the rewrite model risks corrupting a harmless
+# greeting into something that gets misrouted. Skip rewriting for these.
+SKIP_REWRITE_PATTERNS = [
+    "hi", "hey", "hello", "hellooo", "hii", "yo", "sup",
+    "thanks", "thank you", "ok", "okay", "bye", "goodbye",
+]
 
-def agent_query(query, user_id, source_file=None):
+
+def rewrite_query(query, history):
+    """If the message depends on prior conversation context (pronouns like
+    'that', 'it', 'the second one', or implicit references), rewrite it into
+    a standalone question using the recent history — always resolving
+    against the MOST RECENT turn first. If it's already standalone, return
+    it unchanged. Runs BEFORE retrieval, since a vague query embeds poorly
+    and retrieve_chunks() would otherwise fail even if the final answer step
+    'knows' what was meant."""
+    if not history:
+        return query
+
+    stripped = query.strip().lower().strip("!.? ")
+    if stripped in SKIP_REWRITE_PATTERNS or len(stripped) <= 3:
+        return query
+
+    # Only use the last 2 turns for rewriting — the whole history list is
+    # still sent to the final generation step separately, but for RESOLVING
+    # a pronoun, only the most recent topic should matter. Including older
+    # turns here is what caused "that" to latch onto a stale topic.
+    recent = history[-2:]
+    history_text = "\n".join(
+        f"Q: {turn['question']}\nA: {turn['answer']}" for turn in recent
+    )
+
+    prompt = f"""Given the MOST RECENT exchange below and a new message, rewrite the new message into a fully standalone question, using ONLY the most recent exchange to resolve anything vague (like "that", "it", "the second one"). Always assume vague references point to the LAST topic discussed, not anything earlier.
+If the new message is already standalone, a greeting, or doesn't reference anything earlier, return it EXACTLY unchanged.
+Respond with ONLY the rewritten (or unchanged) question - no explanation, no quotes.
+
+Most recent exchange:
+{history_text}
+
+New message: {query}
+
+Standalone question:"""
+
+    response = ollama.generate(
+        model='llama3.2:3b',
+        prompt=prompt,
+        options={'num_predict': 60, 'temperature': 0.1}
+    )
+    rewritten = response['response'].strip().strip('"')
+    return rewritten if rewritten else query
+
+def agent_query(query, user_id, source_file=None, history=None):
     action = agent_decide_action(query)
+
+    # Only rewrite for SEARCH — LIST/SUMMARY/CHAT should act on what the user
+    # actually typed, since rewriting a short command like "what documents
+    # do you have?" against unrelated prior topics can corrupt it.
+    if action == "SEARCH":
+        query = rewrite_query(query, history)
 
     if action != "CHAT" and user_id is None:
         return {
