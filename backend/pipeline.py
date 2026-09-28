@@ -8,6 +8,7 @@ from sentence_transformers import SentenceTransformer
 import psycopg2
 import ollama
 from dotenv import load_dotenv
+import re
 
 load_dotenv()
 
@@ -38,13 +39,43 @@ def ocr_pdf(pdf_path, lang="eng"):
     return full_text
 
 
+_HEADING_RE = re.compile(r"^[A-Z][A-Z &/,\-]{3,40}$")
+
+
+def _heading_of(line):
+    """Return the heading text if this line looks like an ALL-CAPS section
+    heading (ignoring stray bullet characters like '. ' from OCR)."""
+    core = re.sub(r"^[^A-Za-z0-9]+", "", line.strip())
+    return core if _HEADING_RE.match(core) else None
+
+
 def chunk_text(text, chunk_size=500, chunk_overlap=50):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         separators=["\n\n", "\n", "। ", " ", ""]
     )
-    return splitter.split_text(text)
+
+    # 1. Split the document into sections at heading lines
+    sections, heading, body = [], None, []
+    for line in text.split("\n"):
+        h = _heading_of(line)
+        if h:
+            sections.append((heading, "\n".join(body)))
+            heading, body = h, []
+        else:
+            body.append(line)
+    sections.append((heading, "\n".join(body)))
+
+    # 2. Chunk each section on its own, keeping the heading with every chunk
+    chunks = []
+    for heading, body in sections:
+        body = body.strip()
+        if not body:
+            continue
+        for piece in splitter.split_text(body):
+            chunks.append(f"{heading}\n{piece}" if heading else piece)
+    return chunks
 
 
 def embed_chunks(chunks):
@@ -68,50 +99,94 @@ def store_chunks(source_file, chunks, embeddings, content_hash, user_id):
     conn.close()
 
 
-def retrieve_chunks(query, user_id, top_k=5, source_file=None):
+def _keyword_query(text):
+    """Turn a question into an OR-style keyword query, e.g.
+    'What languages does Ramesh speak?' -> 'what | languages | does | ramesh | speak'.
+    Postgres drops common stop words (what, does...) itself."""
+    words = re.findall(r"[A-Za-z0-9]+", text.lower())
+    words = [w for w in words if len(w) > 2]
+    return " | ".join(dict.fromkeys(words))
+
+
+def retrieve_chunks(query, user_id, top_k=5, source_file=None, candidate_k=20):
+    """Hybrid retrieval: semantic (vector) search + keyword (full-text) search,
+    merged with Reciprocal Rank Fusion. Every returned row keeps its real
+    vector distance, so the relevance thresholds in agent_query still work."""
     query_embedding = model.encode(f"query: {query}").tolist()
+    keyword_q = _keyword_query(query)
+
+    scope_sql = "user_id = %s"
+    scope_params = [user_id]
+    if source_file:
+        scope_sql += " AND source_file = %s"
+        scope_params.append(source_file)
+
     conn = get_connection()
     cur = conn.cursor()
 
-    if source_file:
-        cur.execute(
-            """
-            SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
-            FROM document_chunks
-            WHERE source_file = %s AND user_id = %s
-            ORDER BY distance ASC
-            LIMIT %s
-            """,
-            (query_embedding, source_file, user_id, top_k)
-        )
-    else:
-        cur.execute(
-            """
-            SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
-            FROM document_chunks
-            WHERE user_id = %s
-            ORDER BY distance ASC
-            LIMIT %s
-            """,
-            (query_embedding, user_id, top_k)
-        )
+    # 1. Semantic candidates (by meaning)
+    cur.execute(
+        f"""
+        SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
+        FROM document_chunks
+        WHERE {scope_sql}
+        ORDER BY distance ASC
+        LIMIT %s
+        """,
+        [query_embedding] + scope_params + [candidate_k]
+    )
+    semantic = cur.fetchall()
 
-    results = cur.fetchall()
+    # 2. Keyword candidates (by actual words)
+    keyword = []
+    if keyword_q:
+        cur.execute(
+            f"""
+            SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
+            FROM document_chunks
+            WHERE {scope_sql}
+              AND to_tsvector('english', chunk_text) @@ to_tsquery('english', %s)
+            ORDER BY ts_rank(to_tsvector('english', chunk_text), to_tsquery('english', %s)) DESC
+            LIMIT %s
+            """,
+            [query_embedding] + scope_params + [keyword_q, keyword_q, candidate_k]
+        )
+        keyword = cur.fetchall()
+
     cur.close()
     conn.close()
-    return results
+
+    # 3. Merge the two ranked lists (Reciprocal Rank Fusion)
+    RRF_K = 60
+    scores = {}
+    rows = {}
+    for rank, row in enumerate(semantic):
+        scores[row[0]] = scores.get(row[0], 0) + 1 / (RRF_K + rank + 1)
+        rows[row[0]] = row
+    for rank, row in enumerate(keyword):
+        scores[row[0]] = scores.get(row[0], 0) + 1 / (RRF_K + rank + 1)
+        rows[row[0]] = row
+
+    best_ids = sorted(scores, key=scores.get, reverse=True)[:top_k]
+    return [rows[i] for i in best_ids]
 
 def generate_answer(query, retrieved_chunks):
-    # FIX: sort by chunk id to restore original document/narrative order
-    # before building context — retrieval finds chunks by relevance, but the
-    # model should READ them in the order they actually occurred in the source.
-    sorted_chunks = sorted(retrieved_chunks, key=lambda x: x[0])
-    context = "\n\n".join([chunk_text for (_, _, chunk_text, _) in sorted_chunks])
+    # Group chunks by document (each document's chunks stay in original order)
+    # and label each group, so the model can tell which document a fact is from.
+    by_doc = {}
+    for (chunk_id, source_file, chunk_text, _) in sorted(retrieved_chunks, key=lambda x: x[0]):
+        by_doc.setdefault(source_file, []).append(chunk_text)
+
+    context = "\n\n".join(
+        f"[Document: {doc}]\n" + "\n\n".join(chunks)
+        for doc, chunks in by_doc.items()
+    )
 
     prompt = f"""You are a helpful assistant answering questions based only on the provided context.
+The context is split into labeled documents. Details from one document must never be mixed into facts from another.
 Only state facts that are explicitly and directly written in the context. Do not infer causes, combine unrelated events, or guess at relationships between events that aren't clearly stated.
-Provide a complete, informative answer in at least one full sentence  do not just repeat the question's key term.
-If the answer isn't clearly stated in the context, say you don't know  do not make up information.
+Provide a complete, informative answer in at least one full sentence - do not just repeat the question's key term.
+If the answer isn't clearly stated in the context, say you don't know - do not make up information.
 
 Context:
 {context}
@@ -231,14 +306,29 @@ SKIP_REWRITE_PATTERNS = [
 ]
 
 
+# Only messages containing a reference word (it, that, this, he, his, "shorter",
+# "and ...", etc.) can be follow-ups that need rewriting. Anything else is
+# already standalone, and rewriting it only risks pulling in the previous topic.
+_FOLLOWUP_HINTS = re.compile(
+    r"\b(it|its|that|this|these|those|they|them|their|he|him|his|she|her|hers|"
+    r"the above|the previous|the same|same one|former|latter|"
+    r"shorter|longer|simpler|briefer|elaborate|rephrase|again|more|less|"
+    r"i mean|i meant)\b"
+    r"|^(and|also|what about|how about)\b",
+    re.IGNORECASE)
+
+# Messages that are clearly follow-up requests about the previous answer.
+# The CHAT/SEARCH classifier can't see the topic in these, so it calls them CHAT.
+_FOLLOWUP_REQUESTS = re.compile(
+    r"\b(explain|simplif\w*|shorter|longer|elaborate|rephrase|summari[sz]e|clarify|"
+    r"more detail|in one sentence|i mean|i meant)\b"
+    r"|^(and|also|what about|how about)\b",
+    re.IGNORECASE)
+
+
 def rewrite_query(query, history):
-    """If the message depends on prior conversation context (pronouns like
-    'that', 'it', 'the second one', or implicit references), rewrite it into
-    a standalone question using the recent history — always resolving
-    against the MOST RECENT turn first. If it's already standalone, return
-    it unchanged. Runs BEFORE retrieval, since a vague query embeds poorly
-    and retrieve_chunks() would otherwise fail even if the final answer step
-    'knows' what was meant."""
+    """Rewrite a follow-up into a standalone question using the most recent
+    turns. Messages with no follow-up reference words are returned unchanged."""
     if not history:
         return query
 
@@ -246,16 +336,17 @@ def rewrite_query(query, history):
     if stripped in SKIP_REWRITE_PATTERNS or len(stripped) <= 3:
         return query
 
-    # Only use the last 2 turns for rewriting — the whole history list is
-    # still sent to the final generation step separately, but for RESOLVING
-    # a pronoun, only the most recent topic should matter. Including older
-    # turns here is what caused "that" to latch onto a stale topic.
+    # Already standalone (no vague reference) -> leave it alone
+    if not _FOLLOWUP_HINTS.search(query.strip()):
+        return query
+
     recent = history[-2:]
     history_text = "\n".join(
         f"Q: {turn['question']}\nA: {turn['answer']}" for turn in recent
     )
 
-    prompt = f"""Given the MOST RECENT exchange below and a new message, rewrite the new message into a fully standalone question, using ONLY the most recent exchange to resolve anything vague (like "that", "it", "the second one"). Always assume vague references point to the LAST topic discussed, not anything earlier.
+    prompt = f"""Given the MOST RECENT exchange below and a new message, rewrite the new message into a fully standalone question, using ONLY the most recent exchange to resolve vague words (like "that", "it", "this", "he", "she"). Vague references point to the LAST topic discussed, not anything earlier.
+Change ONLY the vague words. Never add topics, names, or qualifiers that are not in the new message.
 If the new message is already standalone, a greeting, or doesn't reference anything earlier, return it EXACTLY unchanged.
 Respond with ONLY the rewritten (or unchanged) question - no explanation, no quotes.
 
@@ -277,11 +368,19 @@ Standalone question:"""
 def agent_query(query, user_id, source_file=None, history=None):
     action = agent_decide_action(query)
 
+    # A follow-up like "explain that more simply" or "no, I mean RAG" has no
+    # topic of its own, so the classifier says CHAT and it gets answered with no
+    # grounding. With history present, treat clear follow-up requests as SEARCH
+    # so they get rewritten and answered from the documents.
+    if action == "CHAT" and history and _FOLLOWUP_REQUESTS.search(query.strip()):
+        action = "SEARCH"
+
     # Only rewrite for SEARCH — LIST/SUMMARY/CHAT should act on what the user
     # actually typed, since rewriting a short command like "what documents
     # do you have?" against unrelated prior topics can corrupt it.
     if action == "SEARCH":
         query = rewrite_query(query, history)
+
 
     if action != "CHAT" and user_id is None:
         return {
@@ -314,7 +413,8 @@ def agent_query(query, user_id, source_file=None, history=None):
         return {"answer": response['response'], "sources": [], "action_taken": "CHAT"}
 
     else:  # SEARCH
-        results = retrieve_chunks(query, user_id, top_k=5, source_file=source_file)
+        results = retrieve_chunks(query, user_id, top_k=8, source_file=source_file)
+
 
         if not results:
             return {
@@ -323,7 +423,7 @@ def agent_query(query, user_id, source_file=None, history=None):
                 "action_taken": "SEARCH_NO_MATCH"
             }
 
-        best_distance = results[0][3]
+        best_distance = min(row[3] for row in results)
         context = "\n\n".join([chunk_text for (_, _, chunk_text, _) in results])
 
         STRONG_THRESHOLD = 0.25
