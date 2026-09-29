@@ -6,9 +6,9 @@ from PIL import Image
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 import psycopg2
-import ollama
 from dotenv import load_dotenv
 import re
+from llm import generate as llm_generate
 
 load_dotenv()
 
@@ -194,12 +194,7 @@ Context:
 Question: {query}
 
 Answer:"""
-    response = ollama.generate(
-        model='llama3.2:3b',
-        prompt=prompt,
-        options={'num_predict': 200, 'temperature': 0.1}
-    )
-    return response['response']
+    return llm_generate(prompt, num_predict=200, temperature=0.1)
 
 
 def list_documents(user_id):
@@ -244,13 +239,22 @@ Document content:
 {context}
 
 Summary:"""
-    response = ollama.generate(model='llama3.2:3b', prompt=prompt, options={'num_predict': 300, 'temperature': 0.2})
-    return response['response']
+    return llm_generate(prompt, num_predict=300, temperature=0.2)
+
+
+GREETING_KEYWORDS = {
+    "hi", "hey", "hello", "hellooo", "hii", "yo", "sup",
+    "good morning", "good afternoon", "good evening",
+    "thanks", "thank you", "ok", "okay", "bye", "goodbye",
+}
 
 
 def agent_decide_action(query):
-    """Decide the action: LIST/SUMMARY via keyword rules, CHAT vs SEARCH via LLM."""
+    """Decide the action: LIST/SUMMARY/CHAT via keyword rules first, CHAT vs SEARCH via LLM otherwise."""
     query_lower = query.lower()
+
+    if query_lower.strip("!.? ") in GREETING_KEYWORDS:
+        return "CHAT"
 
     list_keywords = ["what documents", "which documents", "what files", "which files",
                       "list documents", "list files", "documents have you", "documents do you"]
@@ -273,8 +277,7 @@ Respond with ONLY one word - no explanation, no punctuation:
 Message: {query}
 
 Answer:"""
-    response = ollama.generate(model='llama3.2:3b', prompt=prompt, options={'num_predict': 10, 'temperature': 0.1})
-    decision = response['response'].strip().upper()
+    decision = llm_generate(prompt, num_predict=10, temperature=0.1).strip().upper()
 
     if "CHAT" in decision:
         return "CHAT"
@@ -293,8 +296,7 @@ Context:
 Question: {query}
 
 Answer:"""
-    response = ollama.generate(model='llama3.2:3b', prompt=prompt, options={'num_predict': 10, 'temperature': 0.1})
-    decision = response['response'].strip().upper()
+    decision = llm_generate(prompt, num_predict=10, temperature=0.1).strip().upper()
     return "NO" not in decision  # default to relevant unless explicitly told NO
 
 # Messages this short/simple are almost never a follow-up needing rewriting,
@@ -357,12 +359,7 @@ New message: {query}
 
 Standalone question:"""
 
-    response = ollama.generate(
-        model='llama3.2:3b',
-        prompt=prompt,
-        options={'num_predict': 60, 'temperature': 0.1}
-    )
-    rewritten = response['response'].strip().strip('"')
+    rewritten = llm_generate(prompt, num_predict=60, temperature=0.1).strip().strip('"')
     return rewritten if rewritten else query
 
 def agent_query(query, user_id, source_file=None, history=None):
@@ -405,12 +402,8 @@ def agent_query(query, user_id, source_file=None, history=None):
         return {"answer": answer, "sources": [source_file] if source_file else [], "action_taken": "SUMMARY"}
 
     elif action == "CHAT":
-        response = ollama.generate(
-            model='llama3.2:3b',
-            prompt=f"Respond naturally and briefly to this message: {query}",
-            options={'num_predict': 100}
-        )
-        return {"answer": response['response'], "sources": [], "action_taken": "CHAT"}
+        answer = llm_generate(f"Respond naturally and briefly to this message: {query}", num_predict=100)
+        return {"answer": answer, "sources": [], "action_taken": "CHAT"}
 
     else:  # SEARCH
         results = retrieve_chunks(query, user_id, top_k=8, source_file=source_file)
