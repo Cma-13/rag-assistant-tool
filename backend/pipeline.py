@@ -1,3 +1,4 @@
+import json
 import os
 import io
 import pymupdf as fitz
@@ -8,7 +9,8 @@ from sentence_transformers import SentenceTransformer
 import psycopg2
 from dotenv import load_dotenv
 import re
-from llm import generate as llm_generate
+from llm import generate as llm_generate, groq_chat, PROVIDER as LLM_PROVIDER
+
 
 load_dotenv()
 
@@ -269,10 +271,18 @@ def agent_decide_action(query):
     if any(keyword in query_lower for keyword in summary_keywords):
         return "SUMMARY"
 
-    prompt = f"""You are an assistant that decides how to handle a user's message.
-Respond with ONLY one word - no explanation, no punctuation:
-- "SEARCH" if the message is a question that likely needs looking up information in uploaded documents.
-- "CHAT" if the message is a greeting, small talk, or doesn't require document lookup at all.
+    prompt = f"""You are a router deciding whether a user's message needs the uploaded documents, or is just conversation.
+Respond with ONLY one word - no explanation, no punctuation.
+
+Rules:
+- Any question asking for a definition, fact, explanation, or a "what/who/when/where/why/how" question about any topic is SEARCH - even if you personally already know the answer. The user wants it grounded in THEIR documents, not your own knowledge.
+- CHAT is ONLY for greetings, small talk, thanks, or messages that are not really questions at all.
+
+Examples:
+"What is PostgreSQL used for?" -> SEARCH
+"How's it going?" -> CHAT
+"What is RAG?" -> SEARCH
+"Thanks so much!" -> CHAT
 
 Message: {query}
 
@@ -362,8 +372,104 @@ Standalone question:"""
     rewritten = llm_generate(prompt, num_predict=60, temperature=0.1).strip().strip('"')
     return rewritten if rewritten else query
 
+SEARCH_TOOL = [{
+    "type": "function",
+    "function": {
+        "name": "search_documents",
+        "description": "Search the user's uploaded documents for information relevant to a query. Optionally restrict the search to one specific document by its exact filename.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for"},
+                "source_file": {"type": ["string", "null"], "description": "Optional exact filename to search only within that one document. Pass null or omit this if searching all documents."},
+            },
+            "required": ["query"],
+        },
+    },
+}]
+
+
+def agent_search_loop(query, user_id, history, max_steps=4):
+    """Agentic SEARCH: lets the model call search_documents more than once,
+    e.g. once per document, so a question relevant to several documents
+    doesn't lose one of them to a single top-k retrieval pass."""
+    docs = list_documents(user_id)
+    doc_list_str = ", ".join(docs) if docs else "no documents uploaded yet"
+
+    system_prompt = f"""You are a helpful assistant answering questions using the user's uploaded documents.
+Available documents: {doc_list_str}
+
+Rules you must follow:
+1. Always call search_documents at least once before answering. Never answer from your own general knowledge.
+2. Your FIRST search should NOT set source_file — search across all documents first, so you can see which ones actually contain relevant content.
+3. If that first search returns chunks from more than one document, run a follow-up search scoped to each of those specific documents (using source_file) to gather more detail from each, rather than guessing at document names.
+4. Only include facts that search_documents actually returned. If a document's search found nothing relevant, don't mention that document.
+5. When combining facts from more than one document, you may mention which document a fact is from in plain natural language if it's genuinely helpful for the reader (e.g. "your resume mentions..."), but do NOT use bracket-style citations like [filename.pdf] or 【filename.pdf】 in your answer. Write like a normal, natural assistant.
+6. If nothing relevant is found after searching, say you don't know."""
+
+    messages = [{"role": "system", "content": system_prompt}]
+    for turn in (history or [])[-2:]:
+        messages.append({"role": "user", "content": turn["question"]})
+        messages.append({"role": "assistant", "content": turn["answer"]})
+    messages.append({"role": "user", "content": query})
+
+    all_sources = []
+    for step in range(max_steps):
+        choice = "required" if step == 0 else "auto"
+        response = groq_chat(messages, tools=SEARCH_TOOL, tool_choice=choice)
+        msg = response.choices[0].message
+
+        # Groq doesn't always honor tool_choice="required" on the first turn.
+        # If it skipped the tool on step 0, force one direct unscoped search
+        # ourselves rather than letting the model answer ungrounded.
+        if step == 0 and not msg.tool_calls:
+            results = retrieve_chunks(query, user_id, top_k=8)
+            all_sources.extend(r[1] for r in results)
+    
+            snippet = "\n\n".join(f"[{r[1]}] {r[2]}" for r in results) or "No relevant results found."
+            messages.append({"role": "assistant", "content": msg.content or ""})
+            messages.append({"role": "user", "content": f"Search results for your reference (use these to answer, don't just repeat them):\n\n{snippet}"})
+            continue
+
+        if not msg.tool_calls:
+            return {
+                "answer": msg.content,
+                "sources": list(dict.fromkeys(all_sources)),
+                "action_taken": "AGENT_SEARCH",
+            }
+
+        messages.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [tc.model_dump() for tc in msg.tool_calls],
+        })
+        for call in msg.tool_calls:
+            args = json.loads(call.function.arguments)
+            results = retrieve_chunks(
+                args.get("query", query), user_id, top_k=5,
+                source_file=args.get("source_file")
+            )
+            print(f"AGENT SEARCH: query={args.get('query')!r} source_file={args.get('source_file')!r} -> {len(results)} chunks from {sorted(set(r[1] for r in results))}")
+        
+
+            all_sources.extend(r[1] for r in results)
+            snippet = "\n\n".join(f"[{r[1]}] {r[2]}" for r in results) or "No relevant results found."
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": snippet,
+            })
+
+    return {
+        "answer": "I wasn't able to fully resolve this after several searches — could you rephrase or narrow the question?",
+        "sources": list(dict.fromkeys(all_sources)),
+        "action_taken": "AGENT_SEARCH_INCOMPLETE",
+    }
+
+
 def agent_query(query, user_id, source_file=None, history=None):
     action = agent_decide_action(query)
+
 
     # A follow-up like "explain that more simply" or "no, I mean RAG" has no
     # topic of its own, so the classifier says CHAT and it gets answered with no
@@ -406,6 +512,12 @@ def agent_query(query, user_id, source_file=None, history=None):
         return {"answer": answer, "sources": [], "action_taken": "CHAT"}
 
     else:  # SEARCH
+        if LLM_PROVIDER == "groq":
+            try:
+                return agent_search_loop(query, user_id, history)
+            except Exception as e:
+                print(f"Agent loop failed ({type(e).__name__}): {e}")
+
         results = retrieve_chunks(query, user_id, top_k=8, source_file=source_file)
 
 
