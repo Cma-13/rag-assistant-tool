@@ -50,3 +50,14 @@ def generate(prompt, num_predict=200, temperature=0.1):
             return _call_ollama(prompt, num_predict, temperature)
     else:
         return _call_ollama(prompt, num_predict, temperature)
+    
+def groq_chat(messages, tools=None, tool_choice="auto", temperature=0.1):
+    if _groq_client is None:
+        raise RuntimeError("groq_chat requires LLM_PROVIDER=groq")
+    kwargs = dict(model=GROQ_MODEL, messages=messages, temperature=temperature)
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = tool_choice
+    if "gpt-oss" in GROQ_MODEL:
+        kwargs["reasoning_effort"] = "low"
+    return _groq_client.chat.completions.create(**kwargs)
