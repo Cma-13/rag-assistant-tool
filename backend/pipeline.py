@@ -1,3 +1,4 @@
+from email.mime import image
 import json
 import os
 import io
@@ -10,7 +11,7 @@ import psycopg2
 from dotenv import load_dotenv
 import re
 from llm import generate as llm_generate, groq_chat, PROVIDER as LLM_PROVIDER
-
+import pdfplumber
 
 load_dotenv()
 
@@ -29,15 +30,55 @@ def get_connection():
     )
 
 
+def _format_table(table):
+    """Render a pdfplumber table as clean, pipe-delimited text so each
+    number stays correctly tied to its row and column, rather than relying
+    on OCR to visually reconstruct table alignment from a flattened image."""
+    lines = []
+    for row in table:
+        cells = [str(c).strip() if c is not None else "" for c in row]
+        lines.append(" | ".join(cells))
+    return "\n".join(lines)
+
+
 def ocr_pdf(pdf_path, lang="eng"):
     doc = fitz.open(pdf_path)
     full_text = ""
+
+    # Extract tables directly from the PDF's structure (not from an OCR'd
+    # image), since this preserves exact row/column alignment even when
+    # visual spacing is inconsistent.
+    tables_by_page = {}
+    try:
+        with pdfplumber.open(pdf_path) as pl_doc:
+            for i, page in enumerate(pl_doc.pages):
+                tables = page.extract_tables()
+                if tables:
+                    tables_by_page[i] = tables
+    except Exception:
+        tables_by_page = {}
+
     for page_num, page in enumerate(doc):
-        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-        img_data = pix.tobytes("png")
-        image = Image.open(io.BytesIO(img_data))
-        text = pytesseract.image_to_string(image, lang=lang)
+        native_text = page.get_text().strip()
+
+        if native_text:
+            # Digitally-generated page with a real text layer: use it
+            # directly. This is exact, unlike OCR, which reconstructs text
+            # from pixels and can drop or scramble content.
+            text = native_text
+        else:
+            # No embedded text (a genuinely scanned page) -> fall back to OCR.
+            pix = page.get_pixmap(matrix=fitz.Matrix(4, 4))
+            img_data = pix.tobytes("png")
+            image = Image.open(io.BytesIO(img_data))
+            text = pytesseract.image_to_string(image, lang=lang, config="--psm 6")
+
         full_text += f"\n--- Page {page_num + 1} ---\n{text}"
+
+        if page_num in tables_by_page:
+            for t_idx, table in enumerate(tables_by_page[page_num]):
+                full_text += f"\n\n[Table {t_idx + 1} on Page {page_num + 1}]\n{_format_table(table)}"
+
     return full_text
 
 
