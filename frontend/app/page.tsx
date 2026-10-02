@@ -3,10 +3,19 @@
 import { useState, useRef, useEffect } from "react";
 import AuthModal from "./components/AuthModal";
 
+function isTokenExpired(token: string): boolean {
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1]));
+    return payload.exp * 1000 < Date.now();
+  } catch {
+    return true;
+  }
+}
 interface Message {
   role: "user" | "assistant";
   content: string;
 }
+
 
 function UploadIcon() {
   return (
@@ -119,10 +128,28 @@ export default function Home() {
     const savedToken = localStorage.getItem("token");
     const savedEmail = localStorage.getItem("userEmail");
     if (savedToken && savedEmail) {
-      setToken(savedToken);
-      setUserEmail(savedEmail);
+      if (isTokenExpired(savedToken)) {
+        localStorage.removeItem("token");
+        localStorage.removeItem("userEmail");
+      } else {
+        setToken(savedToken);
+        setUserEmail(savedEmail);
+      }
     }
   }, []);
+
+
+   const handleSessionExpired = () => {
+    localStorage.removeItem("token");
+    localStorage.removeItem("userEmail");
+    setToken(null);
+    setUserEmail(null);
+    setUploadedDocs([]);
+    setMessages((prev) => [
+      ...prev,
+      { role: "assistant", content: "Your session expired — please log in again." },
+    ]);
+  };
 
   const handleSend = async () => {
     if (!input.trim() || loading) return;
@@ -204,11 +231,12 @@ export default function Home() {
     formData.append("file", file);
 
     try {
-      if (!token) {
-        setShowAuthModal(true);
+if (!token || isTokenExpired(token)) {
+        handleSessionExpired();
         setUploading(false);
         return;
       }
+
 
       const res = await fetch("http://127.0.0.1:8000/upload", {
         method: "POST",
