@@ -11,9 +11,185 @@ function isTokenExpired(token: string): boolean {
     return true;
   }
 }
+interface StructuredTable {
+  title: string;
+  columns: string[];
+  rows: string[][];
+}
+
+interface StructuredResult {
+  document: string;
+  pairs: { key: string; value: string }[];
+  tables: StructuredTable[];
+  note: string;
+}
+
+interface Structured {
+  results: StructuredResult[];
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
+  structured?: Structured | null;
+}
+
+// Numbers (with commas, decimals, %) line up on the right in tables.
+const NUMERIC_CELL = /^[-+]?[\d,]*\.?\d+%?$/;
+
+function tableToDelimited(table: StructuredTable, delimiter: string): string {
+  const escape = (cell: string) =>
+    delimiter === "," && /[",\n]/.test(cell)
+      ? `"${cell.replace(/"/g, '""')}"`
+      : cell;
+  return [table.columns, ...table.rows]
+    .map((row) => row.map(escape).join(delimiter))
+    .join("\n");
+}
+
+function TableView({ table }: { table: StructuredTable }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      // Tab-separated, so it pastes into Excel / Google Sheets as real cells.
+      await navigator.clipboard.writeText(tableToDelimited(table, "\t"));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard not available */
+    }
+  };
+
+  const handleDownload = () => {
+    const blob = new Blob([tableToDelimited(table, ",")], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${(table.title || "table").replace(/[^\w\- ]+/g, "").trim() || "table"}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="mt-3 first:mt-0">
+      <div className="mb-1.5 flex items-center justify-between gap-3">
+        <p className="text-[13px] font-semibold text-[#1C1C1E]">
+          {table.title || "Table"}
+          <span className="ml-2 text-[11px] font-normal text-[#9A968C]">
+            {table.rows.length} {table.rows.length === 1 ? "row" : "rows"}
+          </span>
+        </p>
+        <div className="flex flex-shrink-0 items-center gap-1.5">
+          <button
+            onClick={handleCopy}
+            className="rounded-md border border-[#DDD9D0] bg-white px-2 py-0.5 text-[11px] font-medium text-[#6B6B6B] transition hover:border-[#C4DFE0] hover:bg-[#EAF3F3] hover:text-[#2D6A6A]"
+          >
+            {copied ? "Copied" : "Copy"}
+          </button>
+          <button
+            onClick={handleDownload}
+            className="rounded-md border border-[#DDD9D0] bg-white px-2 py-0.5 text-[11px] font-medium text-[#6B6B6B] transition hover:border-[#C4DFE0] hover:bg-[#EAF3F3] hover:text-[#2D6A6A]"
+          >
+            CSV
+          </button>
+        </div>
+      </div>
+
+      <div className="max-h-[420px] overflow-auto rounded-lg border border-[#E0DBD3]">
+        <table className="w-full border-collapse text-[13px]">
+          <thead className="sticky top-0 bg-[#EAF3F3] text-[#2D6A6A]">
+            <tr>
+              {table.columns.map((col, c) => (
+                <th
+                  key={c}
+                  className="whitespace-nowrap border-b border-[#C4DFE0] px-3 py-2 text-left text-[12px] font-semibold"
+                >
+                  {col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {table.rows.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={Math.max(table.columns.length, 1)}
+                  className="px-3 py-3 text-center text-[#9A968C]"
+                >
+                  No rows
+                </td>
+              </tr>
+            ) : (
+              table.rows.map((row, r) => (
+                <tr key={r} className={r % 2 === 1 ? "bg-[#FAF8F5]" : "bg-white"}>
+                  {row.map((cell, c) => (
+                    <td
+                      key={c}
+                      className={`border-b border-[#EFEBE4] px-3 py-1.5 align-top ${
+                        NUMERIC_CELL.test(cell.trim())
+                          ? "whitespace-nowrap text-right tabular-nums"
+                          : ""
+                      }`}
+                    >
+                      {cell}
+                    </td>
+                  ))}
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function PairsView({ pairs }: { pairs: { key: string; value: string }[] }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-[#E0DBD3]">
+      <table className="w-full border-collapse text-[13px]">
+        <tbody>
+          {pairs.map((p, i) => (
+            <tr key={i} className={i % 2 === 1 ? "bg-[#FAF8F5]" : "bg-white"}>
+              <th className="w-[38%] border-b border-[#EFEBE4] bg-[#F5F9F9] px-3 py-1.5 text-left align-top text-[12px] font-semibold text-[#2D6A6A]">
+                {p.key}
+              </th>
+              <td className="border-b border-[#EFEBE4] px-3 py-1.5 align-top">
+                {p.value}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function StructuredView({ structured }: { structured: Structured }) {
+  const showDocNames = structured.results.length > 1;
+  return (
+    <div className="space-y-4">
+      {structured.results.map((result, i) => (
+        <div key={i} className="space-y-3">
+          {showDocNames && (
+            <div className="flex items-center gap-1.5 text-[12px] font-medium text-[#2D6A6A]">
+              <FileIcon /> {result.document}
+            </div>
+          )}
+          {result.pairs.length > 0 && <PairsView pairs={result.pairs} />}
+          {result.tables.map((table, t) => (
+            <TableView key={t} table={table} />
+          ))}
+          {result.note && (
+            <p className="text-[12.5px] italic text-[#9A968C]">{result.note}</p>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 
@@ -184,7 +360,11 @@ export default function Home() {
       const data = await res.json();
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: data.answer },
+        {
+          role: "assistant",
+          content: data.answer,
+          structured: data.structured?.results?.length ? data.structured : null,
+        },
       ]);
     } catch {
       setMessages((prev) => [
@@ -444,7 +624,7 @@ if (!token || isTokenExpired(token)) {
       {/* ── Messages ──────────────────────────────── */}
       <main className="flex flex-1 flex-col overflow-hidden">
         <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
-          <div className="mx-auto max-w-2xl space-y-5">
+          <div className="mx-auto max-w-3xl space-y-5">
             {/* Empty state */}
             {isEmpty && (
               <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -484,13 +664,19 @@ if (!token || isTokenExpired(token)) {
                 )}
 
                 <div
-                  className={`max-w-[80%] rounded-2xl px-4 py-3 text-[14.5px] leading-relaxed shadow-sm ${
+                  className={`${
+                    msg.structured ? "w-full min-w-0 max-w-full" : "max-w-[80%]"
+                  } rounded-2xl px-4 py-3 text-[14.5px] leading-relaxed shadow-sm ${
                     msg.role === "user"
                       ? "rounded-br-sm bg-[#2D6A6A] text-white"
                       : "rounded-bl-sm border border-[#E0DBD3] bg-white text-[#1C1C1E]"
                   }`}
                 >
-                  {renderContent(msg.content)}
+                  {msg.structured ? (
+                    <StructuredView structured={msg.structured} />
+                  ) : (
+                    renderContent(msg.content)
+                  )}
                 </div>
 
                 {/* User avatar */}
@@ -524,7 +710,7 @@ if (!token || isTokenExpired(token)) {
 
         {/* ── Input bar ─────────────────────────────── */}
         <div className="border-t border-[#DDD9D0] bg-[#F0EDE8] px-4 py-4 md:px-8">
-          <div className="mx-auto max-w-2xl">
+          <div className="mx-auto max-w-3xl">
             <div
               className={`flex items-center gap-2 rounded-2xl border bg-white px-4 py-2 shadow-sm transition-all duration-150 ${
                 uploadedDocs.length > 0
