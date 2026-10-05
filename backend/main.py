@@ -3,7 +3,7 @@ import os
 import hashlib
 from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
-from pipeline import ocr_pdf, chunk_text, embed_chunks, store_chunks, retrieve_chunks, generate_answer, get_connection
+from pipeline import ocr_pdf, chunk_text, embed_chunks, store_chunks, retrieve_chunks, generate_answer, get_connection, list_documents
 from fastapi.middleware.cors import CORSMiddleware
 from pipeline import agent_query
 from fastapi import Depends, HTTPException, Header
@@ -175,7 +175,8 @@ def query_documents(request: QueryRequest, current_user: dict | None = Depends(g
         "question": request.question,
         "answer": result["answer"],
         "sources": result["sources"],
-        "action_taken": result["action_taken"]
+        "action_taken": result["action_taken"],
+        "structured": result.get("structured"),  # {"pairs": [...], "tables": [...], "note": "..."} for TABLE answers, else null
     }
     
 @app.get("/documents")
