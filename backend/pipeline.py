@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 import psycopg2
 from dotenv import load_dotenv
 import re
-from llm import generate as llm_generate, groq_chat, generate_json, PROVIDER as LLM_PROVIDER
+from llm import generate as llm_generate, groq_chat, generate_json, LLMBusyError, PROVIDER as LLM_PROVIDER
 import pdfplumber
 
 load_dotenv()
@@ -342,6 +342,7 @@ Only state facts that are explicitly and directly written in the context. Do not
 Provide a complete, informative answer in at least one full sentence - do not just repeat the question's key term.
 If the answer isn't clearly stated in the context, say you don't know - do not make up information.
 Copy numbers, IDs, dates and account numbers exactly as they are written in the context - never reformat them, add spaces to them, or recalculate them.
+Never mention labels such as 'Table 1 on Page 1' in your answer. If the question needs adding up or comparing values from several rows or tables and that total is not written in the context, say it is not stated.
 
 Context:
 {context}
@@ -468,6 +469,7 @@ Rules:
 4. Blocks that start with [Table N on Page M - heading] hold cells separated by " | " and are the most reliable source for table structure, and the heading (when present) is the table's name, so use it to find the table the user means. The other text can be less tidy, and some text can repeat where the document was split into pieces. Ignore the repeats.
 5. If nothing relevant is found, return empty "pairs" and empty "tables" and explain in "note".
 6. Use an empty list for "pairs" or "tables" when it is not needed.
+6b. Never give the same data twice. If you put values in "pairs", do not repeat them in a table, and the other way round.
 7. Return ONLY what was asked. If the user asked for certain rows or columns, or for a table of items, "pairs" must be empty and there must be no extra summaries or other tables. Never put the file name in a title.
 7b. Unless the user asked for specific columns, keep EVERY column of the original table, using the document's own column names. Every row must have a value for every column, in the right place.
 8. Leave "note" empty when you found what was asked for. This text may be only one part of a longer document, so never say that something is missing just because it is not in this part.
@@ -967,6 +969,8 @@ def agent_query(query, user_id, source_file=None, history=None):
                         if columns is None and part["tables"]:
                             columns = part["tables"][0]["columns"]
                         parts.append(part)
+                    except LLMBusyError:
+                        raise
                     except Exception as e:
                         failed += 1
                         print(f"  one piece of {doc} failed ({type(e).__name__}): {e}")
@@ -980,6 +984,12 @@ def agent_query(query, user_id, source_file=None, history=None):
                     extra.append("This document is very long, so only the first part was read.")
                 if extra:
                     structured["note"] = " ".join([structured["note"]] + extra).strip()
+            except LLMBusyError:
+                return {
+                    "answer": "The AI service has reached its usage limit for now, so I can't build a reliable table. Please try again in a few minutes.",
+                    "sources": docs,
+                    "action_taken": "TABLE_BUSY"
+                }
             except Exception as e:
                 print(f"Structured extraction failed for {doc} ({type(e).__name__}): {e}")
                 continue
