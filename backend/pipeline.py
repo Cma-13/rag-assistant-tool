@@ -1,4 +1,3 @@
-from email.mime import image
 import json
 import os
 import io
@@ -10,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 import psycopg2
 from dotenv import load_dotenv
 import re
-from llm import generate as llm_generate, groq_chat, PROVIDER as LLM_PROVIDER
+from llm import generate as llm_generate, groq_chat, generate_json, PROVIDER as LLM_PROVIDER
 import pdfplumber
 
 load_dotenv()
@@ -30,15 +29,113 @@ def get_connection():
     )
 
 
+_NUMERIC_PIECE = re.compile(r"^[\d,.\-%]+$")
+
+
+def _clean_cell(value):
+    """One table cell as a single clean line. pdfplumber keeps the line breaks
+    of wrapped text, so '81,900.0' + '0' is joined back into '81,900.00' and
+    'Qt' + 'y' into 'Qt y'."""
+    if value is None:
+        return ""
+    pieces = [p.strip() for p in str(value).split("\n") if p.strip()]
+    if not pieces:
+        return ""
+    if len(pieces) > 1 and all(_NUMERIC_PIECE.match(p) for p in pieces):
+        return "".join(pieces)
+    return " ".join(pieces)
+
+
 def _format_table(table):
     """Render a pdfplumber table as clean, pipe-delimited text so each
     number stays correctly tied to its row and column, rather than relying
-    on OCR to visually reconstruct table alignment from a flattened image."""
+    on OCR to visually reconstruct table alignment from a flattened image.
+
+    Word/PDF tables with merged cells come out of pdfplumber with many empty
+    cells and repeated labels. Columns that are empty in every row are dropped,
+    rows that are completely empty are skipped, and repeated neighbours are
+    collapsed, so the stored text is short and tidy."""
+    grid = [[_clean_cell(c) for c in row] for row in table]
+    grid = [row for row in grid if any(row)]
+    if not grid:
+        return ""
+
+    width = max(len(r) for r in grid)
+    grid = [r + [""] * (width - len(r)) for r in grid]
+    keep = [j for j in range(width) if any(r[j] for r in grid)]
+
+    # "Dense" rows are the real data rows (most cells filled). A column that is
+    # empty in nearly all of them is a leftover of merged cells (a spacer), so
+    # it is dropped from those rows, which keeps every value under the right
+    # column. Short rows (titles, notes, the invoice-info block) are untouched.
+    dense = [r for r in grid if sum(1 for j in keep if r[j]) >= 0.6 * len(keep)]
+    spacers = set()
+    if len(dense) >= 3:
+        for j in keep:
+            if sum(1 for r in dense if not r[j]) >= 0.9 * len(dense):
+                spacers.add(j)
+    dense_ids = {id(r) for r in dense}
+
     lines = []
-    for row in table:
-        cells = [str(c).strip() if c is not None else "" for c in row]
+    for r in grid:
+        use = [j for j in keep if not (id(r) in dense_ids and j in spacers)]
+        cells = [r[j] for j in use]
+        filled = [c for c in cells if c]
+        if len(filled) * 2 < len(cells):
+            # mostly-empty row (title or merged heading): drop empties and repeats
+            compact = []
+            for c in filled:
+                if not compact or compact[-1] != c:
+                    compact.append(c)
+            cells = compact
         lines.append(" | ".join(cells))
     return "\n".join(lines)
+
+
+# Scanned/image pages are rendered to about this many pixels wide before OCR.
+# Tesseract reads best at roughly this size: a fixed 4x zoom made a large page
+# so huge that digits were misread (3 -> 5, 6 -> 0) and whole lines were lost,
+# while a small A4 page still needs about 4x to reach it.
+OCR_TARGET_WIDTH_PX = 2400
+
+
+def _page_text_outside_tables(page, boxes):
+    """The page's text layer, leaving out words that sit inside a table (those
+    cells are stored separately, cleanly, from the table itself). With no
+    tables this is just the normal page text."""
+    if not boxes:
+        return page.get_text().strip()
+
+    def inside(w):
+        cx, cy = (w[0] + w[2]) / 2, (w[1] + w[3]) / 2
+        return any(x0 <= cx <= x1 and top <= cy <= bottom for (x0, top, x1, bottom) in boxes)
+
+    lines = {}
+    for w in page.get_text("words"):
+        if not inside(w):
+            lines.setdefault((w[5], w[6]), []).append(w[4])
+    return "\n".join(" ".join(ws) for _, ws in sorted(lines.items())).strip()
+
+
+def _title_above(page, box, other_boxes):
+    """The heading line sitting just above a table (for example 'Semester
+    Summary'), so the table keeps its name after the page text is separated
+    from the table cells. Empty if there is none."""
+    x0, top, x1, bottom = box
+
+    def in_any_table(w):
+        cx, cy = (w[0] + w[2]) / 2, (w[1] + w[3]) / 2
+        return any(a <= cx <= c and b <= cy <= d for (a, b, c, d) in other_boxes)
+
+    lines = {}
+    for w in page.get_text("words"):
+        if w[3] <= top + 2 and w[3] >= top - 45 and not in_any_table(w):
+            lines.setdefault((w[5], w[6]), []).append(w)
+    if not lines:
+        return ""
+    nearest = max(lines.values(), key=lambda ws: max(w[3] for w in ws))
+    title = " ".join(w[4] for w in sorted(nearest, key=lambda w: w[0]))
+    return title if len(title) <= 80 else ""
 
 
 def ocr_pdf(pdf_path, lang="eng"):
@@ -47,37 +144,51 @@ def ocr_pdf(pdf_path, lang="eng"):
 
     # Extract tables directly from the PDF's structure (not from an OCR'd
     # image), since this preserves exact row/column alignment even when
-    # visual spacing is inconsistent.
+    # visual spacing is inconsistent. The table's position on the page is kept
+    # too, so the same cells are not stored a second time as messy page text.
     tables_by_page = {}
+    boxes_by_page = {}
     try:
         with pdfplumber.open(pdf_path) as pl_doc:
             for i, page in enumerate(pl_doc.pages):
-                tables = page.extract_tables()
-                if tables:
-                    tables_by_page[i] = tables
+                found = page.find_tables()
+                tables = [t.extract() for t in found]
+                good = [(t, f.bbox) for t, f in zip(tables, found) if t and any(any(c for c in row if c) for row in t)]
+                if good:
+                    tables_by_page[i] = [t for t, _ in good]
+                    boxes_by_page[i] = [bb for _, bb in good]
     except Exception:
-        tables_by_page = {}
+        tables_by_page, boxes_by_page = {}, {}
 
     for page_num, page in enumerate(doc):
-        native_text = page.get_text().strip()
+        has_text_layer = bool(page.get_text().strip())
+        native_text = _page_text_outside_tables(page, boxes_by_page.get(page_num, []))
 
-        if native_text:
+        if has_text_layer:
+            # (a page that is entirely a table leaves no loose text; that is fine,
+            # it must not be sent to OCR)
             # Digitally-generated page with a real text layer: use it
             # directly. This is exact, unlike OCR, which reconstructs text
             # from pixels and can drop or scramble content.
             text = native_text
         else:
             # No embedded text (a genuinely scanned page) -> fall back to OCR.
-            pix = page.get_pixmap(matrix=fitz.Matrix(4, 4))
+            zoom = min(max(OCR_TARGET_WIDTH_PX / page.rect.width, 1), 4)
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
             img_data = pix.tobytes("png")
             image = Image.open(io.BytesIO(img_data))
-            text = pytesseract.image_to_string(image, lang=lang, config="--psm 6")
+            # Default page-segmentation mode: it also reads light text on
+            # coloured bands (table headers, footers), which --psm 6 skipped.
+            text = pytesseract.image_to_string(image, lang=lang)
 
         full_text += f"\n--- Page {page_num + 1} ---\n{text}"
 
         if page_num in tables_by_page:
+            boxes = boxes_by_page[page_num]
             for t_idx, table in enumerate(tables_by_page[page_num]):
-                full_text += f"\n\n[Table {t_idx + 1} on Page {page_num + 1}]\n{_format_table(table)}"
+                title = _title_above(page, boxes[t_idx], boxes) if has_text_layer else ""
+                label = f"Table {t_idx + 1} on Page {page_num + 1}" + (f" - {title}" if title else "")
+                full_text += f"\n\n[{label}]\n{_format_table(table)}"
 
     return full_text
 
@@ -230,6 +341,7 @@ The context is split into labeled documents. Details from one document must neve
 Only state facts that are explicitly and directly written in the context. Do not infer causes, combine unrelated events, or guess at relationships between events that aren't clearly stated.
 Provide a complete, informative answer in at least one full sentence - do not just repeat the question's key term.
 If the answer isn't clearly stated in the context, say you don't know - do not make up information.
+Copy numbers, IDs, dates and account numbers exactly as they are written in the context - never reformat them, add spaces to them, or recalculate them.
 
 Context:
 {context}
@@ -285,6 +397,280 @@ Summary:"""
     return llm_generate(prompt, num_predict=300, temperature=0.2)
 
 
+# ---------------------------------------------------------------------------
+# Structured output: tables and key-value pairs
+# ---------------------------------------------------------------------------
+
+# Explicit requests for table / key-value style output. Kept deliberately
+# narrow so a normal question like "What is a table in PostgreSQL?" still goes
+# to SEARCH. To make the tool recognise more phrasings, add them here.
+_TABLE_REQUEST = re.compile(
+    r"\b(tabular|key[\s\-]?value)\b"
+    r"|\b(in|as|into)\s+(a\s+|the\s+)?(table|tabular)\b"
+    r"|\b(show|give|display|present|format|put|extract|convert|turn|return|list|get|pull|fetch|generate|create|make|build|produce|prepare|print|output|tabulate)\b.{0,40}\b(table|tables|columns?|rows?)\b"
+    r"|\b(complete|full|whole|entire)\s+table\b"
+    r"|\b(show|list|display|give|get|find|fetch)\b(?!.{0,40}\b(documents?|files?|pdfs?)\b).{0,60}\b(where|whose|with|having)\b"
+    r"|\bextract\b.{0,40}\b(data|details|fields|values|information)\b"
+    r"|\b(invoice|bill|receipt|statement)\s+(details|data|summary|fields)\b",
+    re.IGNORECASE)
+
+# The shape Groq is forced to answer in. Values are strings on purpose, so
+# numbers keep their exact original formatting (commas, decimals, symbols).
+_STRUCTURED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pairs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "value": {"type": "string"},
+                },
+                "required": ["key", "value"],
+                "additionalProperties": False,
+            },
+        },
+        "tables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "columns": {"type": "array", "items": {"type": "string"}},
+                    "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+                },
+                "required": ["title", "columns", "rows"],
+                "additionalProperties": False,
+            },
+        },
+        "note": {"type": "string"},
+    },
+    "required": ["pairs", "tables", "note"],
+    "additionalProperties": False,
+}
+
+_STRUCTURED_PROMPT = """You extract structured data from a document and return it as JSON.
+
+The JSON has three parts:
+- "pairs": a list of {"key": ..., "value": ...} for single labeled facts (for example Invoice Number, Date, Total).
+- "tables": a list of tables. Each table has a "title", a list of "columns" (the headers) and "rows" (each row is a list of cell values, in the same order as the columns).
+- "note": one short sentence only if something is missing, unclear, or nothing relevant was found. Otherwise an empty string.
+
+Rules:
+1. Use ONLY information written in the document below. Never use outside knowledge and never invent values.
+2. Copy every value EXACTLY as written, including currency symbols, commas, decimals, percentages and units. Never calculate, round, convert or "fix" a number. If a cell is empty or missing, use "".
+3. Follow what the user asked for:
+   - Whole table(s) requested: return the complete table with every row and every column.
+   - Only certain rows, columns or values requested: return ONLY those, keeping the original column names.
+   - Key-value pairs, details or fields requested: put them in "pairs". Also include a table when there is a list of items (for example line items).
+   - A general request such as "extract the data": return the main details in "pairs" and every table in "tables".
+4. Blocks that start with [Table N on Page M - heading] hold cells separated by " | " and are the most reliable source for table structure, and the heading (when present) is the table's name, so use it to find the table the user means. The other text can be less tidy, and some text can repeat where the document was split into pieces. Ignore the repeats.
+5. If nothing relevant is found, return empty "pairs" and empty "tables" and explain in "note".
+6. Use an empty list for "pairs" or "tables" when it is not needed.
+7. Return ONLY what was asked. If the user asked for certain rows or columns, or for a table of items, "pairs" must be empty and there must be no extra summaries or other tables. Never put the file name in a title.
+7b. Unless the user asked for specific columns, keep EVERY column of the original table, using the document's own column names. Every row must have a value for every column, in the right place.
+8. Leave "note" empty when you found what was asked for. This text may be only one part of a longer document, so never say that something is missing just because it is not in this part.
+
+<<COLUMNS>>Document:
+<<DOCUMENT>>
+
+User request: <<REQUEST>>"""
+
+# Groq's free tier refuses any single request over 8,000 tokens (reading + the
+# room kept for the answer) and allows about 8,000 tokens per minute in total.
+# So each piece of a document is kept small, and the answer is capped too.
+MAX_TABLE_CONTEXT_CHARS = 8000
+MAX_TABLE_ANSWER_TOKENS = 3000
+
+
+# Words that say what KIND of file it is, not which file. A document called
+# "invoice.pdf" must not be picked just because the question says "invoice".
+_GENERIC_NAME_WORDS = {
+    "invoice", "invoices", "bill", "bills", "receipt", "receipts", "report",
+    "document", "documents", "doc", "docs", "file", "files", "pdf", "copy",
+    "final", "new", "sample", "data", "page", "table", "the", "and", "for",
+}
+
+
+def _documents_named_in_query(query, docs):
+    """Documents whose name the user actually typed: the full filename, or the
+    name without .pdf (unless that name is only a generic word like 'invoice')."""
+    q = query.lower()
+    named = []
+    for doc in docs:
+        stem = os.path.splitext(doc)[0].lower().strip()
+        words = re.findall(r"[a-z0-9]+", stem)
+        generic_only = all(w in _GENERIC_NAME_WORDS for w in words)
+        if doc.lower() in q or (len(stem) >= 3 and not generic_only and stem in q):
+            named.append(doc)
+    return named
+
+
+def _pick_documents_for_query(query, user_id, source_file, max_docs=3):
+    """Work out which document(s) the user means: an explicit selection first,
+    then filenames typed in the question, then the documents the search finds
+    the most relevant chunks in. When the question could fit several documents
+    (for example two invoices), return up to max_docs so each gets its own
+    labelled result instead of silently guessing one."""
+    if source_file:
+        return [source_file]
+
+    named = _documents_named_in_query(query, list_documents(user_id))
+    if named:
+        return named[:max_docs]
+
+    results = retrieve_chunks(query, user_id, top_k=8)
+    if not results:
+        return []
+
+    order = list(dict.fromkeys(row[1] for row in results))  # best-ranked first
+    counts = {}
+    for row in results:
+        counts[row[1]] = counts.get(row[1], 0) + 1
+    ranked = sorted(order, key=lambda d: -counts[d])  # stable: ties keep search order
+    # Keep documents with more than half as many matching chunks as the best one
+    return [d for d in ranked if counts[d] > counts[ranked[0]] / 2][:max_docs]
+
+
+MAX_TABLE_WINDOWS = 8
+
+
+def _document_windows(source_file, user_id):
+    """The document's text in original order, cut into pieces that each fit one
+    request. A short document is a single piece. A long one (like a 120-row
+    table) is read piece by piece and the results are combined afterwards, so
+    nothing is skipped just because the document is big.
+
+    Returns (pieces, was_cut_short)."""
+    texts = get_document_chunks_in_order(source_file, user_id, limit=5000)
+    if not texts:
+        return [], False
+
+    # Later pieces would not contain the table's header row, so remind the
+    # model of it (the first line after the first table tag).
+    header = ""
+    for t in texts:
+        if "[Table " in t:
+            after = t.split("]", 1)[-1].strip().split("\n")
+            header = after[0] if after else ""
+            break
+
+    pieces, current, used = [], [], 0
+    for t in texts:
+        if current and used + len(t) > MAX_TABLE_CONTEXT_CHARS:
+            pieces.append("\n\n".join(current))
+            current, used = [], 0
+        current.append(t)
+        used += len(t)
+    if current:
+        pieces.append("\n\n".join(current))
+
+    cut_short = len(pieces) > MAX_TABLE_WINDOWS
+    pieces = pieces[:MAX_TABLE_WINDOWS]
+    if header and len(pieces) > 1:
+        pieces = [pieces[0]] + [f"[The table's header row is: {header}]\n\n{x}" for x in pieces[1:]]
+    return pieces, cut_short
+
+
+def _merge_structured(parts):
+    """Combine the results from several pieces of one document: tables with the
+    same number of columns are joined into one table (repeated rows removed),
+    and repeated key-value pairs are removed."""
+    pairs, seen_pairs = [], set()
+    tables = []
+    notes = []
+    for part in parts:
+        for pr in part["pairs"]:
+            k = (pr["key"].lower(), pr["value"])
+            if k not in seen_pairs:
+                seen_pairs.add(k)
+                pairs.append(pr)
+        for t in part["tables"]:
+            match = next((m for m in tables if len(m["columns"]) == len(t["columns"])), None)
+            if match is None:
+                tables.append({"title": t["title"], "columns": list(t["columns"]), "rows": [], "_seen": set()})
+                match = tables[-1]
+            for row in t["rows"]:
+                if tuple(row) not in match["_seen"]:
+                    match["_seen"].add(tuple(row))
+                    match["rows"].append(row)
+        if part["note"] and part["note"] not in notes:
+            notes.append(part["note"])
+    for t in tables:
+        t.pop("_seen")
+    # A "nothing found" note from one piece is noise when another piece found the data.
+    note = "" if (pairs or tables) else " ".join(notes)
+    return {"pairs": pairs, "tables": tables, "note": note}
+
+
+def _clean_structured(data):
+    """Tidy the model's JSON: strip whitespace, make every row exactly as long
+    as its header, and drop empty rows/pairs, so the display never breaks."""
+    if not isinstance(data, dict):
+        raise ValueError("structured output was not a JSON object")
+
+    pairs = []
+    for p in data.get("pairs") or []:
+        key = str(p.get("key", "")).strip()
+        value = str(p.get("value", "")).strip()
+        if key or value:
+            pairs.append({"key": key, "value": value})
+
+    tables = []
+    for t in data.get("tables") or []:
+        columns = [str(c).strip() for c in (t.get("columns") or [])]
+        rows = []
+        for r in t.get("rows") or []:
+            cells = [str(c).strip() for c in r]
+            if columns:
+                cells = (cells + [""] * len(columns))[:len(columns)]
+            if any(cells):
+                rows.append(cells)
+        if columns or rows:
+            tables.append({"title": str(t.get("title", "")).strip(), "columns": columns, "rows": rows})
+
+    return {"pairs": pairs, "tables": tables, "note": str(data.get("note") or "").strip()}
+
+
+def extract_structured(query, document_text, columns_hint=None):
+    """Ask the LLM to pull key-value pairs and/or tables out of the document,
+    shaped by what the user asked for."""
+    hint = ""
+    if columns_hint:
+        hint = ("This text is one part of a longer document. If you return a table, use EXACTLY these column names "
+                "in this order, so the parts can be joined: " + " | ".join(columns_hint) + "\n\n")
+    prompt = (_STRUCTURED_PROMPT.replace("<<COLUMNS>>", hint)
+              .replace("<<DOCUMENT>>", document_text).replace("<<REQUEST>>", query))
+    return _clean_structured(generate_json(prompt, _STRUCTURED_SCHEMA, max_tokens=MAX_TABLE_ANSWER_TOKENS))
+
+
+def _structured_to_text(structured):
+    """Plain-text version of the structured result (key: value lines and
+    markdown-style tables), used as the chat answer text."""
+    parts = []
+    if structured["pairs"]:
+        parts.append("\n".join(f"{p['key']}: {p['value']}" for p in structured["pairs"]))
+
+    for t in structured["tables"]:
+        lines = []
+        if t["title"]:
+            lines.append(t["title"])
+        if t["columns"]:
+            lines.append("| " + " | ".join(t["columns"]) + " |")
+            lines.append("| " + " | ".join("---" for _ in t["columns"]) + " |")
+        for row in t["rows"]:
+            lines.append("| " + " | ".join(row) + " |")
+        parts.append("\n".join(lines))
+
+    if structured["note"]:
+        parts.append(structured["note"])
+
+    if not parts:
+        return "I couldn't find any table or structured data for that in the document."
+    return "\n\n".join(parts)
+
+
 GREETING_KEYWORDS = {
     "hi", "hey", "hello", "hellooo", "hii", "yo", "sup",
     "good morning", "good afternoon", "good evening",
@@ -293,7 +679,7 @@ GREETING_KEYWORDS = {
 
 
 def agent_decide_action(query):
-    """Decide the action: LIST/SUMMARY/CHAT via keyword rules first, CHAT vs SEARCH via LLM otherwise."""
+    """Decide the action: LIST/SUMMARY/TABLE/CHAT via keyword rules first, CHAT vs SEARCH via LLM otherwise."""
     query_lower = query.lower()
 
     if query_lower.strip("!.? ") in GREETING_KEYWORDS:
@@ -311,6 +697,9 @@ def agent_decide_action(query):
                          "tell me about the pdf", "tell me about this pdf"]
     if any(keyword in query_lower for keyword in summary_keywords):
         return "SUMMARY"
+
+    if _TABLE_REQUEST.search(query):
+        return "TABLE"
 
     prompt = f"""You are a router deciding whether a user's message needs the uploaded documents, or is just conversation.
 Respond with ONLY one word - no explanation, no punctuation.
@@ -446,7 +835,8 @@ Rules you must follow:
 3. If that first search returns chunks from more than one document, run a follow-up search scoped to each of those specific documents (using source_file) to gather more detail from each, rather than guessing at document names.
 4. Only include facts that search_documents actually returned. If a document's search found nothing relevant, don't mention that document.
 5. When combining facts from more than one document, you may mention which document a fact is from in plain natural language if it's genuinely helpful for the reader (e.g. "your resume mentions..."), but do NOT use bracket-style citations like [filename.pdf] or 【filename.pdf】 in your answer. Write like a normal, natural assistant.
-6. If nothing relevant is found after searching, say you don't know."""
+6. If nothing relevant is found after searching, say you don't know.
+7. Copy numbers, IDs, dates and account numbers exactly as they appear in the search results - never reformat them, add spaces to them, or recalculate them. If a value (such as a total) is not actually written in the results, do not work it out yourself; say it isn't stated."""
 
     messages = [{"role": "system", "content": system_prompt}]
     for turn in (history or [])[-2:]:
@@ -466,7 +856,7 @@ Rules you must follow:
         if step == 0 and not msg.tool_calls:
             results = retrieve_chunks(query, user_id, top_k=8)
             all_sources.extend(r[1] for r in results)
-    
+
             snippet = "\n\n".join(f"[{r[1]}] {r[2]}" for r in results) or "No relevant results found."
             messages.append({"role": "assistant", "content": msg.content or ""})
             messages.append({"role": "user", "content": f"Search results for your reference (use these to answer, don't just repeat them):\n\n{snippet}"})
@@ -491,7 +881,7 @@ Rules you must follow:
                 source_file=args.get("source_file")
             )
             print(f"AGENT SEARCH: query={args.get('query')!r} source_file={args.get('source_file')!r} -> {len(results)} chunks from {sorted(set(r[1] for r in results))}")
-        
+
 
             all_sources.extend(r[1] for r in results)
             snippet = "\n\n".join(f"[{r[1]}] {r[2]}" for r in results) or "No relevant results found."
@@ -547,6 +937,75 @@ def agent_query(query, user_id, source_file=None, history=None):
         else:
             answer = generate_summary(source_file, user_id)
         return {"answer": answer, "sources": [source_file] if source_file else [], "action_taken": "SUMMARY"}
+
+    elif action == "TABLE":
+        docs = _pick_documents_for_query(query, user_id, source_file)
+        if not docs:
+            return {
+                "answer": "I couldn't find a document with that information. Try naming the document, for example: \"show the table in invoice.pdf\".",
+                "sources": [],
+                "action_taken": "TABLE_NO_MATCH"
+            }
+
+        explicit = bool(source_file) or bool(_documents_named_in_query(query, list_documents(user_id)))
+
+        results = []
+        for doc in docs:
+            try:
+                pieces, cut_short = _document_windows(doc, user_id)
+                has_tables = any("[Table " in x for x in pieces)
+                # A long document with no tables that the user did not ask for
+                # by name is not worth reading piece by piece.
+                if not explicit and len(pieces) > 1 and not has_tables:
+                    print(f"TABLE: skipping '{doc}' (long, no tables, not named)")
+                    continue
+                print(f"TABLE: using '{doc}' ({len(pieces)} piece(s), {sum(len(x) for x in pieces)} characters)")
+                parts, failed, columns = [], 0, None
+                for piece in pieces:
+                    try:
+                        part = extract_structured(query, piece, columns)
+                        if columns is None and part["tables"]:
+                            columns = part["tables"][0]["columns"]
+                        parts.append(part)
+                    except Exception as e:
+                        failed += 1
+                        print(f"  one piece of {doc} failed ({type(e).__name__}): {e}")
+                if not parts:
+                    raise RuntimeError("every piece failed")
+                structured = _merge_structured(parts)
+                extra = []
+                if failed:
+                    extra.append(f"Part of this document could not be read this time ({failed} of {len(pieces)} pieces), so the result may be incomplete. Please try again.")
+                if cut_short:
+                    extra.append("This document is very long, so only the first part was read.")
+                if extra:
+                    structured["note"] = " ".join([structured["note"]] + extra).strip()
+            except Exception as e:
+                print(f"Structured extraction failed for {doc} ({type(e).__name__}): {e}")
+                continue
+            results.append({"document": doc, **structured})
+
+        if not results:
+            return {
+                "answer": "I couldn't turn that into a table this time. Please try again or rephrase.",
+                "sources": docs,
+                "action_taken": "TABLE_ERROR"
+            }
+
+        # Only show documents where something was actually found. If none had
+        # anything, show the first one so the user sees the "not found" note.
+        shown = [r for r in results if r["pairs"] or r["tables"]] or results[:1]
+        if len(shown) == 1:
+            answer = _structured_to_text(shown[0])
+        else:
+            answer = "\n\n".join(f"From {r['document']}:\n{_structured_to_text(r)}" for r in shown)
+
+        return {
+            "answer": answer,
+            "sources": [r["document"] for r in shown],
+            "action_taken": "TABLE",
+            "structured": {"results": shown},
+        }
 
     elif action == "CHAT":
         answer = llm_generate(f"Respond naturally and briefly to this message: {query}", num_predict=100)
