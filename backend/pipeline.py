@@ -1117,10 +1117,15 @@ def agent_query(query, user_id, source_file=None, history=None):
         }
 
     elif action == "CHAT":
-        answer = llm_generate(
-            f"{ASSISTANT_BACKGROUND}\nRespond naturally and briefly (1 to 3 sentences) to the message below. "
-            f"If it asks about you, answer from the description above. Do not make up abilities.\n\nMessage: {query}",
-            num_predict=150)
+        if _ABOUT_ASSISTANT.search(query):
+            # A question about the assistant itself: answer from its background line.
+            answer = llm_generate(
+                f"{ASSISTANT_BACKGROUND}\nAnswer the question below briefly (1 to 3 sentences), only from the description above. "
+                f"Do not make up abilities.\n\nQuestion: {query}",
+                num_predict=150)
+        else:
+            # Ordinary small talk: just chat, without bringing up PDFs.
+            answer = llm_generate(f"Respond naturally and briefly to this message: {query}", num_predict=100)
         return {"answer": answer, "sources": [], "action_taken": "CHAT"}
 
     else:  # SEARCH
