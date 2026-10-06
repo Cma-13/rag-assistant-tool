@@ -91,7 +91,7 @@ def read_root():
 
 def get_unique_filename(cur, filename, user_id):
     """If filename is already used by different content, append (1), (2), etc.
-    until we find a name not currently in the KB — scoped to this user only,
+    until we find a name not currently in the KB scoped to this user only,
     since different users can have files with the same name."""
     cur.execute("SELECT DISTINCT source_file FROM document_chunks WHERE user_id = %s;", (user_id,))
     existing_names = {row[0] for row in cur.fetchall()}

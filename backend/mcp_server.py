@@ -5,7 +5,7 @@ from auth import decode_access_token
 
 ACCESS_TOKEN = os.getenv("DOCQUERY_ACCESS_TOKEN")
 if not ACCESS_TOKEN:
-    raise RuntimeError("Set DOCQUERY_ACCESS_TOKEN — get one by logging in via the DocQuery app.")
+    raise RuntimeError("Set DOCQUERY_ACCESS_TOKEN get one by logging in via the DocQuery app.")
 
 _payload = decode_access_token(ACCESS_TOKEN)
 if not _payload:
