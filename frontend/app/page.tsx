@@ -427,7 +427,7 @@ export default function Home() {
     setUploadedDocs([]);
     setMessages((prev) => [
       ...prev,
-      { role: "assistant", content: "Your session expired. Please log in again." },
+      { role: "assistant", content: "Your session expired — please log in again." },
     ]);
   };
 
@@ -649,25 +649,8 @@ if (!token || isTokenExpired(token)) {
           </div>
         </div>
 
-        {/* Uploaded files */}
-        {uploadedDocs.length > 0 && (
-          <div className="flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-x-auto">
-            {uploadedDocs.map((doc) => (
-              <div
-                key={doc}
-                className="flex flex-shrink-0 items-center gap-1.5 rounded-full border border-[#C4DFE0] bg-[#EAF3F3] px-3 py-1"
-                title={doc}
-              >
-                <span className="text-[#2D6A6A] flex-shrink-0">
-                  <FileIcon />
-                </span>
-                <span className="max-w-[140px] truncate text-[11px] font-medium text-[#2D6A6A]">
-                  {doc}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
+        {/* Spacer keeps the upload and account buttons on the right */}
+        <div className="flex-1" />
 
         {/* Upload button */}
         <label className="flex flex-shrink-0 cursor-pointer items-center gap-1.5 rounded-full border border-[#DDD9D0] bg-white px-3.5 py-1.5 text-xs font-medium text-[#6B6B6B] shadow-sm transition hover:border-[#C4DFE0] hover:bg-[#EAF3F3] hover:text-[#2D6A6A]">
@@ -870,6 +853,10 @@ if (!token || isTokenExpired(token)) {
               <input
                 ref={inputRef}
                 type="text"
+                name="chat-message"
+                autoComplete="off"
+                data-lpignore="true"
+                data-form-type="other"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) =>
