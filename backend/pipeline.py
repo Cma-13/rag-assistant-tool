@@ -14,6 +14,30 @@ import pdfplumber
 
 load_dotenv()
 
+# --- Feature registry ---------------------------------------------------
+# Every user-facing feature announces itself with @feature("...") right above
+# the code that does the work. When someone asks "what can you do?", the tool
+# builds its answer from this list, so a new feature only needs its own
+# @feature line - there is no separate "about" text to keep up to date.
+FEATURES = []
+
+
+def register_feature(description):
+    if description not in FEATURES:
+        FEATURES.append(description)
+
+
+def feature(description):
+    def decorator(fn):
+        register_feature(description)
+        return fn
+    return decorator
+
+
+# Features that live in the website part (frontend) rather than in a function here.
+register_feature("Show tables as real tables that can be copied or downloaded as CSV")
+register_feature("Keep your chat history after you refresh the page")
+
 # --- Load model once, reused everywhere ---
 model = SentenceTransformer('intfloat/multilingual-e5-base')
 
@@ -138,6 +162,7 @@ def _title_above(page, box, other_boxes):
     return title if len(title) <= 80 else ""
 
 
+@feature("Read scanned PDFs by recognising the text in the page images")
 def ocr_pdf(pdf_path, lang="eng"):
     doc = fitz.open(pdf_path)
     full_text = ""
@@ -262,6 +287,7 @@ def _keyword_query(text):
     return " | ".join(dict.fromkeys(words))
 
 
+@feature("Search all uploaded PDFs by meaning and by exact words")
 def retrieve_chunks(query, user_id, top_k=5, source_file=None, candidate_k=20):
     """Hybrid retrieval: semantic (vector) search + keyword (full-text) search,
     merged with Reciprocal Rank Fusion. Every returned row keeps its real
@@ -353,6 +379,7 @@ Answer:"""
     return llm_generate(prompt, num_predict=200, temperature=0.1)
 
 
+@feature("List the documents that have been uploaded")
 def list_documents(user_id):
     conn = get_connection()
     cur = conn.cursor()
@@ -382,6 +409,7 @@ def get_document_chunks_in_order(source_file, user_id, limit=25):
     return [row[0] for row in results]
 
 
+@feature("Summarise a document")
 def generate_summary(source_file, user_id):
     """Generate a broad summary using chunks spread across the document."""
     chunks = get_document_chunks_in_order(source_file, user_id, limit=25)
@@ -637,6 +665,7 @@ def _clean_structured(data):
     return {"pairs": pairs, "tables": tables, "note": str(data.get("note") or "").strip()}
 
 
+@feature("Pull out tables and key-value details (like invoice fields or marks) from a document")
 def extract_structured(query, document_text, columns_hint=None):
     """Ask the LLM to pull key-value pairs and/or tables out of the document,
     shaped by what the user asked for."""
@@ -675,6 +704,53 @@ def _structured_to_text(structured):
     return "\n\n".join(parts)
 
 
+# Questions about the tool itself ("what can you do?", "who are you?"). These
+# are answered with a fixed description of what the tool really does, so the
+# answer is always accurate and never pretends to come from an uploaded file.
+# The answer is built from the @feature list (see FEATURES at the top).
+_ABOUT_TOOL = re.compile(
+    r"\bwhat\s+(can|could)\s+you\s+(do|help)\b"
+    r"|\bwhat\s+are\s+you(r)?\s+(capabilit\w+|features?|abilit\w+|able\s+to|purpose)\b"
+    r"|\byour\s+(capabilit\w+|features?|abilit\w+|purpose)\b"
+    r"|\bwho\s+are\s+you\b|\bwhat\s+are\s+you\b"
+    r"|\bwhat\s+(do|does)\s+(you|this\s+(tool|assistant|app|system))\s+do\b(?!\s+for\b)"
+    r"|\bwhat\s+is\s+(this|your)\s+(tool|assistant|app|system|job|role)\b"
+    r"|\btell\s+me\s+about\s+(yourself|this\s+(tool|assistant|app|system))\b"
+    r"|\bintroduce\s+yourself\b"
+    r"|\bhow\s+(do|does)\s+(you|this\s+(tool|assistant|app))\s+work\b"
+    r"|\bhow\s+can\s+you\s+help\b|\bwhat\s+can\s+i\s+ask\b",
+    re.IGNORECASE)
+
+def describe_tool(query="", user_id=None):
+    """Answer a question about the tool itself ("what can you do?", "who are you?").
+    The LLM answers the user's actual question in its own words, and it may only
+    use the FEATURES list (plus the user's uploaded documents), so what it says
+    always matches what the tool really has."""
+    try:
+        docs = list_documents(user_id) if user_id is not None else []
+    except Exception:
+        docs = []
+    feature_lines = "\n".join("- " + f for f in FEATURES)
+    doc_line = ("The user has uploaded: " + ", ".join(docs[:8])) if docs else "The user has not uploaded any documents yet."
+    prompt = f"""You are DocQuery, a document Q&A tool. Your main job: you answer questions using the PDFs the user uploads, and only what is written in them.
+Here is everything you can do (this list is the only truth about your abilities):
+{feature_lines}
+
+{doc_line}
+
+The user asked: "{query}"
+
+Reply to exactly what they asked, in a natural, friendly, conversational way, in your own words. Keep it short (2 to 5 sentences). Do not use a fixed template or a heading. Only mention the abilities that fit their question, and only abilities from the list above. If they have no documents yet, you can invite them to upload one; if they do, you can mention you are ready to answer questions about them. Never invent abilities."""
+    plain = ("I'm DocQuery, a document Q&A tool. I answer questions using the PDFs you upload, and only what is written in them. "
+             "I can: " + "; ".join(f[0].lower() + f[1:] for f in FEATURES) + ".")
+    try:
+        text = llm_generate(prompt, num_predict=300, temperature=0.8).strip()
+        return text if len(text) > 40 else plain
+    except Exception as e:
+        print(f"describe_tool fell back to the plain list ({type(e).__name__}): {e}")
+        return plain
+
+
 GREETING_KEYWORDS = {
     "hi", "hey", "hello", "hellooo", "hii", "yo", "sup",
     "good morning", "good afternoon", "good evening",
@@ -683,11 +759,14 @@ GREETING_KEYWORDS = {
 
 
 def agent_decide_action(query):
-    """Decide the action: LIST/SUMMARY/TABLE/CHAT via keyword rules first, CHAT vs SEARCH via LLM otherwise."""
+    """Decide the action: LIST/SUMMARY/TABLE/ABOUT/CHAT via keyword rules first, CHAT vs SEARCH via LLM otherwise."""
     query_lower = query.lower()
 
     if query_lower.strip("!.? ") in GREETING_KEYWORDS:
         return "CHAT"
+
+    if _ABOUT_TOOL.search(query):
+        return "ABOUT"
 
     list_keywords = ["what documents", "which documents", "what files", "which files",
                       "list documents", "list files", "documents have you", "documents do you"]
@@ -772,6 +851,7 @@ _FOLLOWUP_REQUESTS = re.compile(
     re.IGNORECASE)
 
 
+@feature("Understand follow-up questions such as 'explain that more simply'")
 def rewrite_query(query, history):
     """Rewrite a follow-up into a standalone question using the most recent
     turns. Messages with no follow-up reference words are returned unchanged."""
@@ -806,6 +886,56 @@ Standalone question:"""
     rewritten = llm_generate(prompt, num_predict=60, temperature=0.1).strip().strip('"')
     return rewritten if rewritten else query
 
+_SOURCE_STOPWORDS = {
+    "which", "their", "there", "about", "would", "could", "should", "these", "those",
+    "other", "where", "while", "being", "using", "based", "document", "documents",
+    "provided", "context", "information", "mentioned", "stated", "written",
+}
+
+
+_NO_ANSWER = re.compile(
+    r"couldn'?t find|could not find|can'?t find|don'?t know|do not know|no information|"
+    r"not (mentioned|stated|found|covered|present|available)|isn'?t (mentioned|stated|covered)|"
+    r"doesn'?t (contain|mention|appear)", re.IGNORECASE)
+
+
+@feature("Show which documents each answer came from")
+def _sources_used(answer, chunks, max_sources=3):
+    """Which documents did the answer really come from? Retrieval pulls chunks
+    from many documents, but the answer usually uses only one or two. A
+    document counts when words/numbers from the answer appear in its retrieved
+    text. Words found in every document count for little, words found in only
+    one document count for a lot.
+    `chunks` is a list of (document_name, chunk_text)."""
+    # A short "I couldn't find / I don't know" answer used no document at all.
+    if len(answer) < 250 and _NO_ANSWER.search(answer):
+        return []
+
+    texts = {}
+    for doc, text in chunks:
+        texts[doc] = texts.get(doc, "") + " " + text.lower()
+    if not texts:
+        return []
+
+    tokens = {t for t in re.findall(r"[a-z0-9][a-z0-9.,\-]{3,}", answer.lower())}
+    tokens = {t.strip(".,-") for t in tokens} - _SOURCE_STOPWORDS
+    tokens = {t for t in tokens if len(t) >= 4 or any(c.isdigit() for c in t)}
+
+    scores = {}
+    for doc, text in texts.items():
+        scores[doc] = 0.0
+    for t in tokens:
+        holders = [d for d, text in texts.items() if t in text]
+        for d in holders:
+            scores[d] += 1.0 / len(holders)
+
+    best = max(scores.values())
+    if best <= 0:
+        return []
+    keep = [d for d, sc in sorted(scores.items(), key=lambda x: -x[1]) if sc >= 0.4 * best]
+    return keep[:max_sources]
+
+
 SEARCH_TOOL = [{
     "type": "function",
     "function": {
@@ -823,6 +953,7 @@ SEARCH_TOOL = [{
 }]
 
 
+@feature("Answer questions from one document or across several, searching again when needed")
 def agent_search_loop(query, user_id, history, max_steps=4):
     """Agentic SEARCH: lets the model call search_documents more than once,
     e.g. once per document, so a question relevant to several documents
@@ -835,7 +966,7 @@ Available documents: {doc_list_str}
 
 Rules you must follow:
 1. Always call search_documents at least once before answering. Never answer from your own general knowledge.
-2. Your FIRST search should NOT set source_file — search across all documents first, so you can see which ones actually contain relevant content.
+2. Your FIRST search should NOT set source_file search across all documents first, so you can see which ones actually contain relevant content.
 3. If that first search returns chunks from more than one document, run a follow-up search scoped to each of those specific documents (using source_file) to gather more detail from each, rather than guessing at document names.
 4. Only include facts that search_documents actually returned. If a document's search found nothing relevant, don't mention that document.
 5. When combining facts from more than one document, you may mention which document a fact is from in plain natural language if it's genuinely helpful for the reader (e.g. "your resume mentions..."), but do NOT use bracket-style citations like [filename.pdf] or 【filename.pdf】 in your answer. Write like a normal, natural assistant.
@@ -849,6 +980,7 @@ Rules you must follow:
     messages.append({"role": "user", "content": query})
 
     all_sources = []
+    all_chunks = []  # (document, text) of everything the searches returned
     for step in range(max_steps):
         choice = "required" if step == 0 else "auto"
         response = groq_chat(messages, tools=SEARCH_TOOL, tool_choice=choice)
@@ -860,6 +992,7 @@ Rules you must follow:
         if step == 0 and not msg.tool_calls:
             results = retrieve_chunks(query, user_id, top_k=8)
             all_sources.extend(r[1] for r in results)
+            all_chunks.extend((r[1], r[2]) for r in results)
 
             snippet = "\n\n".join(f"[{r[1]}] {r[2]}" for r in results) or "No relevant results found."
             messages.append({"role": "assistant", "content": msg.content or ""})
@@ -869,7 +1002,7 @@ Rules you must follow:
         if not msg.tool_calls:
             return {
                 "answer": msg.content,
-                "sources": list(dict.fromkeys(all_sources)),
+                "sources": _sources_used(msg.content or "", all_chunks),
                 "action_taken": "AGENT_SEARCH",
             }
 
@@ -888,6 +1021,7 @@ Rules you must follow:
 
 
             all_sources.extend(r[1] for r in results)
+            all_chunks.extend((r[1], r[2]) for r in results)
             snippet = "\n\n".join(f"[{r[1]}] {r[2]}" for r in results) or "No relevant results found."
             messages.append({
                 "role": "tool",
@@ -896,8 +1030,8 @@ Rules you must follow:
             })
 
     return {
-        "answer": "I wasn't able to fully resolve this after several searches — could you rephrase or narrow the question?",
-        "sources": list(dict.fromkeys(all_sources)),
+        "answer": "I wasn't able to fully resolve this after several searches could you rephrase or narrow the question?",
+        "sources": [],
         "action_taken": "AGENT_SEARCH_INCOMPLETE",
     }
 
@@ -919,6 +1053,10 @@ def agent_query(query, user_id, source_file=None, history=None):
     if action == "SEARCH":
         query = rewrite_query(query, history)
 
+
+    # Questions about the tool itself need no login and no documents.
+    if action == "ABOUT":
+        return {"answer": describe_tool(query, user_id), "sources": [], "action_taken": "ABOUT"}
 
     if action != "CHAT" and user_id is None:
         return {
@@ -1045,7 +1183,7 @@ def agent_query(query, user_id, source_file=None, history=None):
 
         if not results:
             return {
-                "answer": "I don't know — this doesn't appear to be covered in the knowledge base.",
+                "answer": "I don't know this doesn't appear to be covered in the knowledge base.",
                 "sources": [],
                 "action_taken": "SEARCH_NO_MATCH"
             }
@@ -1065,11 +1203,11 @@ def agent_query(query, user_id, source_file=None, history=None):
 
         if not is_relevant:
             return {
-                "answer": "I don't know — this doesn't appear to be covered in the knowledge base.",
+                "answer": "I don't know this doesn't appear to be covered in the knowledge base.",
                 "sources": [],
                 "action_taken": "SEARCH_NO_MATCH"
             }
 
         answer = generate_answer(query, results)
-        sources = list(dict.fromkeys([source_file for (_, source_file, _, _) in results]))
+        sources = _sources_used(answer, [(src, text) for (_, src, text, _) in results])
         return {"answer": answer, "sources": sources, "action_taken": "SEARCH"}
