@@ -32,6 +32,7 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   structured?: Structured | null;
+  sources?: string[];
 }
 
 // Numbers (with commas, decimals, %) line up on the right in tables.
@@ -365,6 +366,44 @@ export default function Home() {
       .catch(() => {});
   }, [token]);
 
+  // ── Chat history: saved in this browser, one history per logged-in user ──
+  const historyKey = userEmail ? `chatHistory:${userEmail}` : null;
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+
+  // When a user is logged in (or logs in again), bring back their saved chat.
+  useEffect(() => {
+    if (!historyKey) {
+      setLoadedKey(null);
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(historyKey);
+      setMessages(raw ? JSON.parse(raw) : []);
+    } catch {
+      setMessages([]);
+    }
+    setLoadedKey(historyKey);
+  }, [historyKey]);
+
+  // Save the chat after every change (only the last 100 messages are kept).
+  useEffect(() => {
+    if (!historyKey || loadedKey !== historyKey) return;
+    try {
+      localStorage.setItem(historyKey, JSON.stringify(messages.slice(-100)));
+    } catch {
+      /* storage full or blocked - the chat still works, it just won't be saved */
+    }
+  }, [messages, historyKey, loadedKey]);
+
+  const handleClearChat = () => {
+    setMessages([]);
+    if (historyKey) {
+      try {
+        localStorage.removeItem(historyKey);
+      } catch {}
+    }
+  };
+
   useEffect(() => {
     const savedToken = localStorage.getItem("token");
     const savedEmail = localStorage.getItem("userEmail");
@@ -388,7 +427,7 @@ export default function Home() {
     setUploadedDocs([]);
     setMessages((prev) => [
       ...prev,
-      { role: "assistant", content: "Your session expired — please log in again." },
+      { role: "assistant", content: "Your session expired. Please log in again." },
     ]);
   };
 
@@ -429,6 +468,7 @@ export default function Home() {
           role: "assistant",
           content: data.answer,
           structured: data.structured?.results?.length ? data.structured : null,
+          sources: Array.isArray(data.sources) ? data.sources : [],
         },
       ]);
     } catch {
@@ -458,6 +498,7 @@ export default function Home() {
     setToken(null);
     setUserEmail(null);
     setUploadedDocs([]);
+    setMessages([]); // the saved chat stays in the browser for the next login
   };
 
   const processFile = async (file: File) => {
@@ -666,6 +707,15 @@ if (!token || isTokenExpired(token)) {
                 <button
                   onClick={() => {
                     setShowUserMenu(false);
+                    handleClearChat();
+                  }}
+                  className="w-full px-3 py-1.5 text-left text-[13px] text-[#1C1C1E] hover:bg-[#F5F3EF]"
+                >
+                  Clear chat
+                </button>
+                <button
+                  onClick={() => {
+                    setShowUserMenu(false);
                     handleLogout();
                   }}
                   className="w-full px-3 py-1.5 text-left text-[13px] text-[#1C1C1E] hover:bg-[#F5F3EF]"
@@ -756,6 +806,25 @@ if (!token || isTokenExpired(token)) {
                     <StructuredView structured={msg.structured} />
                   ) : (
                     renderContent(msg.content)
+                  )}
+
+                  {/* Which document(s) the answer came from */}
+                  {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (
+                    <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-[#EFEBE4] pt-2">
+                      <span className="text-[11px] text-[#9A968C]">Sources:</span>
+                      {msg.sources.map((src) => (
+                        <span
+                          key={src}
+                          title={src}
+                          className="flex max-w-[220px] items-center gap-1 rounded-full border border-[#C4DFE0] bg-[#EAF3F3] px-2 py-0.5 text-[11px] font-medium text-[#2D6A6A]"
+                        >
+                          <span className="flex-shrink-0">
+                            <FileIcon />
+                          </span>
+                          <span className="truncate">{src}</span>
+                        </span>
+                      ))}
+                    </div>
                   )}
                 </div>
 
