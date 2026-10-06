@@ -411,6 +411,8 @@ _TABLE_REQUEST = re.compile(
     r"|\b(show|give|display|present|format|put|extract|convert|turn|return|list|get|pull|fetch|generate|create|make|build|produce|prepare|print|output|tabulate)\b.{0,40}\b(table|tables|columns?|rows?)\b"
     r"|\b(complete|full|whole|entire)\s+table\b"
     r"|\b(show|list|display|give|get|find|fetch)\b(?!.{0,40}\b(documents?|files?|pdfs?)\b).{0,60}\b(where|whose|with|having)\b"
+    r"|\b(show|list|display|give|get|find|fetch)\b(?!.{0,40}\b(documents?|files?|pdfs?|answers?|explain\w*|summar\w*)\b)"
+    r".{0,60}\b(only|and above|and below|or above|or below|more than|less than|greater than|higher than|lower than|at least|at most|above|below|between)\b"
     r"|\bextract\b.{0,40}\b(data|details|fields|values|information)\b"
     r"|\b(invoice|bill|receipt|statement)\s+(details|data|summary|fields)\b",
     re.IGNORECASE)
@@ -952,9 +954,12 @@ def agent_query(query, user_id, source_file=None, history=None):
         explicit = bool(source_file) or bool(_documents_named_in_query(query, list_documents(user_id)))
 
         results = []
+        sections = {}
         for doc in docs:
             try:
                 pieces, cut_short = _document_windows(doc, user_id)
+                sections[doc] = list(dict.fromkeys(
+                    re.findall(r"\[Table \d+ on Page \d+ - ([^\]]+)\]", "\n".join(pieces))))
                 has_tables = any("[Table " in x for x in pieces)
                 # A long document with no tables that the user did not ask for
                 # by name is not worth reading piece by piece.
@@ -986,7 +991,7 @@ def agent_query(query, user_id, source_file=None, history=None):
                     structured["note"] = " ".join([structured["note"]] + extra).strip()
             except LLMBusyError:
                 return {
-                    "answer": "The AI service has reached its usage limit for now, so I can't build a reliable table. Please try again in a few minutes.",
+                    "answer": "Groq's usage limit has been reached for now, so I can't build a reliable table right now. Please try again in a few minutes.",
                     "sources": docs,
                     "action_taken": "TABLE_BUSY"
                 }
@@ -1002,9 +1007,16 @@ def agent_query(query, user_id, source_file=None, history=None):
                 "action_taken": "TABLE_ERROR"
             }
 
-        # Only show documents where something was actually found. If none had
-        # anything, show the first one so the user sees the "not found" note.
-        shown = [r for r in results if r["pairs"] or r["tables"]] or results[:1]
+        # Only show documents where something was actually found.
+        shown = [r for r in results if r["pairs"] or r["tables"]]
+        if not shown:
+            first = results[0]["document"]
+            answer = f"I couldn't find that in {first}."
+            # Suggest at most 3 short section names (long headings are skipped).
+            short = [s for s in sections.get(first, []) if len(s) <= 30][:3]
+            if short:
+                answer += " Try asking about: " + ", ".join(short) + "."
+            return {"answer": answer, "sources": [first], "action_taken": "TABLE_NOT_FOUND"}
         if len(shown) == 1:
             answer = _structured_to_text(shown[0])
         else:
