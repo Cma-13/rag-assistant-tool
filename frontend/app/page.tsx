@@ -47,7 +47,67 @@ function tableToDelimited(table: StructuredTable, delimiter: string): string {
     .join("\n");
 }
 
+
+// A column counts as numeric when every filled cell in it is a number.
+function numericColumns(table: StructuredTable): boolean[] {
+  return table.columns.map((_, c) => {
+    const cells = table.rows.map((r) => (r[c] ?? "").trim()).filter(Boolean);
+    return cells.length > 0 && cells.every((cell) => NUMERIC_CELL.test(cell));
+  });
+}
+
+// Plain-text answers sometimes contain a markdown table ("| a | b |" lines).
+// Turn those into real tables so they never show up as one long line of pipes.
+type Block =
+  | { kind: "text"; text: string }
+  | { kind: "table"; table: StructuredTable };
+
+function splitCells(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((c) => c.trim());
+}
+
+function parseBlocks(text: string): Block[] {
+  const lines = text.split("\n");
+  const isRow = (l: string) => /^\s*\|.*\|\s*$/.test(l);
+  const isSeparator = (l: string) => isRow(l) && /^[\s|:-]+$/.test(l) && l.includes("-");
+  const blocks: Block[] = [];
+  let buffer: string[] = [];
+
+  const flush = () => {
+    if (buffer.length) blocks.push({ kind: "text", text: buffer.join("\n") });
+    buffer = [];
+  };
+
+  let i = 0;
+  while (i < lines.length) {
+    if (isRow(lines[i]) && i + 1 < lines.length && isSeparator(lines[i + 1])) {
+      const columns = splitCells(lines[i]);
+      const rows: string[][] = [];
+      let j = i + 2;
+      while (j < lines.length && isRow(lines[j]) && !isSeparator(lines[j])) {
+        const cells = splitCells(lines[j]);
+        rows.push([...cells, ...Array(columns.length).fill("")].slice(0, columns.length));
+        j++;
+      }
+      flush();
+      blocks.push({ kind: "table", table: { title: "", columns, rows } });
+      i = j;
+    } else {
+      buffer.push(lines[i]);
+      i++;
+    }
+  }
+  flush();
+  return blocks;
+}
+
 function TableView({ table }: { table: StructuredTable }) {
+  const numericCols = numericColumns(table);
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -62,7 +122,8 @@ function TableView({ table }: { table: StructuredTable }) {
   };
 
   const handleDownload = () => {
-    const blob = new Blob([tableToDelimited(table, ",")], {
+    // "﻿" (BOM) tells Excel the file is UTF-8, so symbols like "–" show correctly
+    const blob = new Blob(["﻿" + tableToDelimited(table, ",")], {
       type: "text/csv;charset=utf-8;",
     });
     const url = URL.createObjectURL(blob);
@@ -77,8 +138,8 @@ function TableView({ table }: { table: StructuredTable }) {
     <div className="mt-3 first:mt-0">
       <div className="mb-1.5 flex items-center justify-between gap-3">
         <p className="text-[13px] font-semibold text-[#1C1C1E]">
-          {table.title || "Table"}
-          <span className="ml-2 text-[11px] font-normal text-[#9A968C]">
+          {table.title}
+          <span className={`${table.title ? "ml-2" : ""} text-[11px] font-normal text-[#9A968C]`}>
             {table.rows.length} {table.rows.length === 1 ? "row" : "rows"}
           </span>
         </p>
@@ -99,13 +160,15 @@ function TableView({ table }: { table: StructuredTable }) {
       </div>
 
       <div className="max-h-[420px] overflow-auto rounded-lg border border-[#E0DBD3]">
-        <table className="w-full border-collapse text-[13px]">
+        <table className="w-auto min-w-[55%] table-auto border-collapse text-[12.5px]">
           <thead className="sticky top-0 bg-[#EAF3F3] text-[#2D6A6A]">
             <tr>
               {table.columns.map((col, c) => (
                 <th
                   key={c}
-                  className="whitespace-nowrap border-b border-[#C4DFE0] px-3 py-2 text-left text-[12px] font-semibold"
+                  className={`border-b border-[#C4DFE0] px-3 py-2 align-bottom text-[11.5px] font-semibold leading-tight ${
+                    numericCols[c] ? "text-right" : "text-left"
+                  }`}
                 >
                   {col}
                 </th>
@@ -129,9 +192,11 @@ function TableView({ table }: { table: StructuredTable }) {
                     <td
                       key={c}
                       className={`border-b border-[#EFEBE4] px-3 py-1.5 align-top ${
-                        NUMERIC_CELL.test(cell.trim())
+                        numericCols[c]
                           ? "whitespace-nowrap text-right tabular-nums"
-                          : ""
+                          : cell.length <= 14
+                            ? "whitespace-nowrap"
+                            : ""
                       }`}
                     >
                       {cell}
@@ -479,8 +544,9 @@ if (!token || isTokenExpired(token)) {
     }
   };
 
-  // Render **bold** markdown inline
-  const renderContent = (text: string) =>
+  // Render **bold** markdown inline, keep line breaks, and show any
+  // markdown table in the text as a real table.
+  const renderBold = (text: string) =>
     text
       .split(/(\*\*[^*]+\*\*)/)
       .map((part, i) =>
@@ -490,6 +556,18 @@ if (!token || isTokenExpired(token)) {
           <span key={i}>{part}</span>
         ),
       );
+  const renderContent = (text: string) =>
+    parseBlocks(text).map((block, i) =>
+      block.kind === "table" ? (
+        <div key={i} className="my-2">
+          <TableView table={block.table} />
+        </div>
+      ) : (
+        <span key={i} className="whitespace-pre-wrap">
+          {renderBold(block.text)}
+        </span>
+      ),
+    );
   const userInitial = userEmail ? userEmail[0].toUpperCase() : "U";
   const isEmpty = messages.length === 0;
 
@@ -665,7 +743,9 @@ if (!token || isTokenExpired(token)) {
 
                 <div
                   className={`${
-                    msg.structured ? "w-full min-w-0 max-w-full" : "max-w-[80%]"
+                    msg.structured || parseBlocks(msg.content).some((b) => b.kind === "table")
+                      ? "w-full min-w-0 max-w-full"
+                      : "max-w-[80%]"
                   } rounded-2xl px-4 py-3 text-[14.5px] leading-relaxed shadow-sm ${
                     msg.role === "user"
                       ? "rounded-br-sm bg-[#2D6A6A] text-white"
