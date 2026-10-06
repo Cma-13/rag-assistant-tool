@@ -53,6 +53,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
             {mode === "login" ? "Log in" : "Create an account"}
           </h2>
           <button
+            type="button"
             onClick={onClose}
             className="text-[#9A968C] hover:text-[#1C1C1E]"
             aria-label="Close"
@@ -61,9 +62,17 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
           </button>
         </div>
 
-        <div className="space-y-3">
+        <form
+          className="space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleSubmit();
+          }}
+        >
           <input
             type="email"
+            name="email"
+            autoComplete="username"
             placeholder="Email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
@@ -71,17 +80,18 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
           />
           <input
             type="password"
+            name="password"
+            autoComplete={mode === "login" ? "current-password" : "new-password"}
             placeholder="Password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
             className="w-full rounded-xl border border-[#DDD9D0] px-3 py-2 text-[14.5px] outline-none focus:border-[#2D6A6A]"
           />
 
           {error && <p className="text-[13px] text-red-600">{error}</p>}
 
           <button
-            onClick={handleSubmit}
+            type="submit"
             disabled={loading}
             className="w-full rounded-xl bg-[#2D6A6A] py-2 text-[14.5px] font-medium text-white transition hover:bg-[#255757] disabled:opacity-50"
           >
@@ -91,13 +101,14 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
                 ? "Log in"
                 : "Sign up"}
           </button>
-        </div>
+        </form>
 
         <p className="mt-4 text-center text-[13px] text-[#6B6B6B]">
           {mode === "login" ? (
             <>
               Don&apos;t have an account?{" "}
               <button
+                type="button"
                 onClick={() => {
                   setMode("signup");
                   setError("");
@@ -111,6 +122,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
             <>
               Already have an account?{" "}
               <button
+                type="button"
                 onClick={() => {
                   setMode("login");
                   setError("");
