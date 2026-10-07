@@ -1182,7 +1182,7 @@ def agent_query(query, user_id, source_file=None, history=None):
             except LLMBusyError:
                 return {
                     "answer": "Groq's usage limit has been reached for now, so I can't build a reliable table right now. Please try again in a few minutes.",
-                    "sources": docs,
+                    "sources": [],
                     "action_taken": "TABLE_BUSY"
                 }
             except Exception as e:
@@ -1193,7 +1193,7 @@ def agent_query(query, user_id, source_file=None, history=None):
         if not results:
             return {
                 "answer": "I couldn't turn that into a table this time. Please try again or rephrase.",
-                "sources": docs,
+                "sources": [],
                 "action_taken": "TABLE_ERROR"
             }
 
