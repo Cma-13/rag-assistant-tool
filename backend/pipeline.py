@@ -886,6 +886,9 @@ def _sources_used(answer, chunks, max_sources=3):
     text. Words found in every document count for little, words found in only
     one document count for a lot.
     `chunks` is a list of (document_name, chunk_text)."""
+    # The model often writes curly apostrophes (don\u2019t), which would not match
+    # the refusal phrases below.
+    answer = answer.replace("\u2019", "'").replace("\u2018", "'")
     # A short "I couldn't find / I don't know" answer used no document at all.
     if len(answer) < 250 and _NO_ANSWER.search(answer):
         return []
