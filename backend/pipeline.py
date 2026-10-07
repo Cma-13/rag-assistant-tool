@@ -346,7 +346,9 @@ Provide a complete, informative answer in at least one full sentence - do not ju
 If the answer isn't clearly stated in the context, say you don't know - do not make up information.
 Copy numbers, IDs, dates and account numbers exactly as they are written in the context - never reformat them, add spaces to them, or recalculate them.
 If the user asks about you (who you are, what you can do), say briefly that you are a document Q&A assistant that answers questions from the PDFs they upload. Never describe what the documents say as your own skills, knowledge or experience.
-Never mention labels such as 'Table 1 on Page 1' in your answer. If the question needs adding up or comparing values from several rows or tables and that total is not written in the context, say it is not stated.
+Never mention labels such as 'Table 1 on Page 1' in your answer. If the question needs adding up or comparing values from several rows or tables and that total is not written in the context, say it is not stated. The same goes for counting: if the question asks how many items or rows there are and that number is not written in the context, say it is not stated.
+Answer only if the context directly states the thing asked about. Do not guess from related details: a phone number of the seller is not the buyer's, and a black telephone does not tell you the colour of a door. If the context is about a different person, company or thing than the one asked about, say it is not stated.
+Write currency exactly as it appears in the context (for example Rs. or NPR); never change it to another symbol such as the rupee sign or a dollar sign.
 
 Context:
 {context}
@@ -389,12 +391,13 @@ def get_document_chunks_in_order(source_file, user_id, limit=25):
 
 def generate_summary(source_file, user_id):
     """Generate a broad summary using chunks spread across the document."""
-    chunks = get_document_chunks_in_order(source_file, user_id, limit=25)
+    chunks = get_document_chunks_in_order(source_file, user_id, limit=40)
     if not chunks:
         return "I don't have any content to summarize yet please upload a document first."
 
-    context = "\n\n".join(chunks)
+    context = "\n\n".join(chunks)[:18000]
     prompt = f"""Summarize the following document content in 3-5 sentences, covering its main topics and purpose.
+Use only facts written in the text. Do not guess who people are or how they are related unless the text says so.
 
 Document content:
 {context}
@@ -474,7 +477,8 @@ Rules:
    - Key-value pairs, details or fields requested: put them in "pairs". Also include a table when there is a list of items (for example line items).
    - A general request such as "extract the data": return the main details in "pairs" and every table in "tables".
 4. Blocks that start with [Table N on Page M - heading] hold cells separated by " | " and are the most reliable source for table structure, and the heading (when present) is the table's name, so use it to find the table the user means. The other text can be less tidy, and some text can repeat where the document was split into pieces. Ignore the repeats.
-5. If nothing relevant is found, return empty "pairs" and empty "tables" and explain in "note".
+5. If nothing relevant is found, return empty "pairs" and empty "tables" and explain in "note". When the user names a particular table or topic (for example "consumption history" or "slab calculation") and this text has no such table, return nothing - never return a different table instead.
+5b. Give every table a short, plain title that says what it holds (for example "Invoice Items"). Never use a title like "Table 2 on Page 1".
 6. Use an empty list for "pairs" or "tables" when it is not needed.
 6b. Never give the same data twice. If you put values in "pairs", do not repeat them in a table, and the other way round.
 7. Return ONLY what was asked. If the user asked for certain rows or columns, or for a table of items, "pairs" must be empty and there must be no extra summaries or other tables. Never put the file name in a title.
@@ -690,6 +694,8 @@ _ABOUT_ASSISTANT = re.compile(
     r"|\bthings\s+(that\s+)?you\s+(can|could)\b"
     r"|\bwhat\s+are\s+you(r)?\s+(capabilit\w+|features?|abilit\w+|able\s+to|purpose)\b"
     r"|\byour\s+(capabilit\w+|features?|abilit\w+|purpose)\b"
+    r"|\bwhat\s+(capabilit\w+|features?|abilit\w+)\s+(do\s+you|does\s+this\s+(tool|assistant|app|system))\s+have\b"
+    r"|\bwhat\s+(do|can)\s+you\s+(offer|provide)\b"
     r"|\bwho\s+are\s+you\b|\bwhat\s+are\s+you\b"
     r"|\bwhat\s+(do|does)\s+(you|this\s+(tool|assistant|app|system))\s+do\b(?!\s+for\b)"
     r"|\bwhat\s+(can|could)\s+(this|the)\s+(tool|assistant|app|system)\s+do\b"
@@ -712,6 +718,23 @@ GREETING_KEYWORDS = {
 }
 
 
+# "list all documents", "show my files" (the keyword list above misses these).
+_LIST_REQUEST = re.compile(
+    r"\b(list|show)\s+(me\s+)?(all\s+)?(the\s+|my\s+|uploaded\s+)*(documents|files|pdfs)\b", re.IGNORECASE)
+
+# "summarize the story / this document / the pdf" - a summary of ONE whole file.
+# A topic summary like "summarize the Rana regime" is NOT matched; it is a normal question.
+_SUMMARY_REQUEST = re.compile(
+    r"\b(summari[sz]e|summary\s+of|overview\s+of|gist\s+of)\b.{0,25}"
+    r"\b(document|pdf|file|story|article|report|text|paper|manual|guide|agreement|interview|invoice|bill)\b",
+    re.IGNORECASE)
+
+# "give me an overview of all these documents" - one short summary per file.
+_OVERVIEW_ALL = re.compile(
+    r"\b(overview|summary|summari[sz]e|describe|tell\s+me\s+about)\b.{0,40}\b(all|each|every)\b.{0,20}\b(documents?|files?|pdfs?)\b",
+    re.IGNORECASE)
+
+
 def agent_decide_action(query):
     """Decide the action: LIST/SUMMARY/TABLE/CHAT via keyword rules first, CHAT vs SEARCH via LLM otherwise."""
     query_lower = query.lower()
@@ -724,15 +747,18 @@ def agent_decide_action(query):
 
     list_keywords = ["what documents", "which documents", "what files", "which files",
                       "list documents", "list files", "documents have you", "documents do you"]
-    if any(keyword in query_lower for keyword in list_keywords):
+    if any(keyword in query_lower for keyword in list_keywords) or _LIST_REQUEST.search(query):
         return "LIST"
+
+    if _OVERVIEW_ALL.search(query):
+        return "OVERVIEW"
 
     summary_keywords = ["tell me about this document", "tell me about the document",
                          "what is this document about", "what's this document about",
                          "summarize this document", "summarize the document",
                          "give me a summary", "what does this document cover",
                          "tell me about the pdf", "tell me about this pdf"]
-    if any(keyword in query_lower for keyword in summary_keywords):
+    if any(keyword in query_lower for keyword in summary_keywords) or _SUMMARY_REQUEST.search(query):
         return "SUMMARY"
 
     if _TABLE_REQUEST.search(query):
@@ -849,7 +875,8 @@ _SOURCE_STOPWORDS = {
 _NO_ANSWER = re.compile(
     r"couldn'?t find|could not find|can'?t find|don'?t know|do not know|no information|"
     r"not (mentioned|stated|found|covered|present|available)|isn'?t (mentioned|stated|covered)|"
-    r"doesn'?t (contain|mention|appear)", re.IGNORECASE)
+    r"(doesn'?t|does not|don'?t|do not) (contain|mention|appear|include|have|provide|say|state|specify)|"
+    r"wasn'?t able|unable to find|no (mention|details|data)|not (specified|provided|listed)", re.IGNORECASE)
 
 
 def _sources_used(answer, chunks, max_sources=3):
@@ -869,6 +896,10 @@ def _sources_used(answer, chunks, max_sources=3):
     if not texts:
         return []
 
+    # The model often writes dates and numbers with special non-breaking
+    # hyphens/spaces, which would never match the document text.
+    answer = re.sub(r"[\u2010-\u2015\u2212]", "-", answer)
+    answer = re.sub(r"[\u00a0\u202f\u2009]", " ", answer)
     tokens = {t for t in re.findall(r"[a-z0-9][a-z0-9.,\-]{3,}", answer.lower())}
     tokens = {t.strip(".,-") for t in tokens} - _SOURCE_STOPWORDS
     tokens = {t for t in tokens if len(t) >= 4 or any(c.isdigit() for c in t)}
@@ -923,7 +954,10 @@ Rules you must follow:
 5. When combining facts from more than one document, you may mention which document a fact is from in plain natural language if it's genuinely helpful for the reader (e.g. "your resume mentions..."), but do NOT use bracket-style citations like [filename.pdf] or 【filename.pdf】 in your answer. Write like a normal, natural assistant.
 6. If nothing relevant is found after searching, say you don't know.
 7. Copy numbers, IDs, dates and account numbers exactly as they appear in the search results - never reformat them, add spaces to them, or recalculate them. If a value (such as a total) is not actually written in the results, do not work it out yourself; say it isn't stated.
-8. If the user asks about you (who you are, what you can do), say briefly that you are a document Q&A assistant that answers questions from the PDFs they upload. Never describe what the documents say as your own skills, knowledge or experience."""
+8. If the user asks about you (who you are, what you can do), say briefly that you are a document Q&A assistant that answers questions from the PDFs they upload. Never describe what the documents say as your own skills, knowledge or experience.
+9. Answer only if the search results directly state the thing asked about. Do not guess from related details: a phone number of the seller is not the buyer's, and a black telephone does not tell you the colour of a door. If the results are about a different person, company or thing than the one asked about, say you couldn't find it.
+10. If the user asks how many items or rows there are and that number is not written in the results, say it isn't stated - do not count them yourself.
+11. Write currency exactly as it appears in the results (for example Rs. or NPR); never change it to another symbol such as the rupee sign or a dollar sign."""
 
     messages = [{"role": "system", "content": system_prompt}]
     for turn in (history or [])[-2:]:
@@ -934,7 +968,7 @@ Rules you must follow:
     all_sources = []
     all_chunks = []  # (document, text) of everything the searches returned
     for step in range(max_steps):
-        choice = "required" if step == 0 else "auto"
+        choice = "required" if step == 0 else ("none" if step == max_steps - 1 else "auto")
         response = groq_chat(messages, tools=SEARCH_TOOL, tool_choice=choice)
         msg = response.choices[0].message
 
@@ -943,6 +977,7 @@ Rules you must follow:
         # ourselves rather than letting the model answer ungrounded.
         if step == 0 and not msg.tool_calls:
             results = retrieve_chunks(query, user_id, top_k=8)
+            results = add_following_chunks(results, user_id)
             all_sources.extend(r[1] for r in results)
             all_chunks.extend((r[1], r[2]) for r in results)
 
@@ -969,6 +1004,7 @@ Rules you must follow:
                 args.get("query", query), user_id, top_k=5,
                 source_file=args.get("source_file")
             )
+            results = add_following_chunks(results, user_id)
             print(f"AGENT SEARCH: query={args.get('query')!r} source_file={args.get('source_file')!r} -> {len(results)} chunks from {sorted(set(r[1] for r in results))}")
 
 
@@ -986,6 +1022,69 @@ Rules you must follow:
         "sources": [],
         "action_taken": "AGENT_SEARCH_INCOMPLETE",
     }
+
+
+def _resolve_summary_doc(query, user_id, source_file):
+    """Which document does 'summarize the story' mean? An explicit selection,
+    a filename typed in the question, the only document, or the document the
+    search finds clearly best. Returns None when it is not clear."""
+    if source_file:
+        return source_file
+    docs = list_documents(user_id)
+    if len(docs) == 1:
+        return docs[0]
+    named = _documents_named_in_query(query, docs)
+    if len(named) == 1:
+        return named[0]
+    results = retrieve_chunks(query, user_id, top_k=8)
+    if not results:
+        return None
+    counts = {}
+    for row in results:
+        counts[row[1]] = counts.get(row[1], 0) + 1
+    ranked = sorted(counts, key=lambda d: -counts[d])
+    if len(ranked) == 1 or counts[ranked[0]] >= 2 * counts[ranked[1]]:
+        return ranked[0]
+    return None
+
+
+def generate_overview(user_id, max_docs=8):
+    """One or two sentences about each uploaded document, using only the start of each."""
+    lines = []
+    for doc in list_documents(user_id)[:max_docs]:
+        chunks = get_document_chunks_in_order(doc, user_id, limit=6)
+        if not chunks:
+            continue
+        text = "\n\n".join(chunks)[:3000]
+        prompt = f"""In one or two short sentences, say what this document is about. Use only the text below.
+
+Text:
+{text}
+
+Answer:"""
+        lines.append(f"- {doc}: " + llm_generate(prompt, num_predict=100, temperature=0.1).strip())
+    return "\n".join(lines) if lines else "No documents have been uploaded yet."
+
+
+def add_following_chunks(results, user_id, max_total=10):
+    """A fact can sit just after the point where a passage was cut. When the
+    results come from one document, also fetch the chunk right after each hit."""
+    if not results or len({r[1] for r in results}) != 1:
+        return results
+    have = {r[0] for r in results}
+    wanted = sorted({r[0] + 1 for r in results} - have)
+    if not wanted:
+        return results
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, source_file, chunk_text FROM document_chunks WHERE id = ANY(%s) AND user_id = %s",
+        (wanted, user_id))
+    extra = [(i, src, text, 1.0) for (i, src, text) in cur.fetchall() if src == results[0][1]]
+    cur.close()
+    conn.close()
+    combined = sorted(list(results) + extra, key=lambda r: r[0])
+    return combined if len(combined) <= max_total else list(results)
 
 
 def agent_query(query, user_id, source_file=None, history=None):
@@ -1022,12 +1121,16 @@ def agent_query(query, user_id, source_file=None, history=None):
             answer = "No documents have been uploaded yet."
         return {"answer": answer, "sources": [], "action_taken": "LIST"}
 
+    elif action == "OVERVIEW":
+        return {"answer": generate_overview(user_id), "sources": [], "action_taken": "OVERVIEW"}
+
     elif action == "SUMMARY":
-        if not source_file:
-            answer = "Please tell me which document you'd like summarized."
-        else:
-            answer = generate_summary(source_file, user_id)
-        return {"answer": answer, "sources": [source_file] if source_file else [], "action_taken": "SUMMARY"}
+        target = _resolve_summary_doc(query, user_id, source_file)
+        if not target:
+            docs = list_documents(user_id)
+            answer = "Which document would you like summarized? You have: " + ", ".join(docs) if docs else "No documents have been uploaded yet."
+            return {"answer": answer, "sources": [], "action_taken": "SUMMARY"}
+        return {"answer": generate_summary(target, user_id), "sources": [target], "action_taken": "SUMMARY"}
 
     elif action == "TABLE":
         docs = _pick_documents_for_query(query, user_id, source_file)
