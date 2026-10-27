@@ -314,6 +314,27 @@ function FileIcon() {
   );
 }
 
+function TrashIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </svg>
+  );
+}
+
 function BotIcon() {
   return (
     <svg
@@ -351,6 +372,9 @@ export default function Home() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authMode, setAuthMode] = useState<"login" | "signup">("login");
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [showDocs, setShowDocs] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [deletingDoc, setDeletingDoc] = useState<string | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -429,6 +453,33 @@ export default function Home() {
       ...prev,
       { role: "assistant", content: "Your session expired — please log in again." },
     ]);
+  };
+
+  const handleDeleteDocument = async (name: string) => {
+    if (!token || isTokenExpired(token)) {
+      setConfirmDelete(null);
+      setShowDocs(false);
+      handleSessionExpired();
+      return;
+    }
+    setDeletingDoc(name);
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:8000/documents?name=${encodeURIComponent(name)}`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${token}` } },
+      );
+      if (!res.ok) throw new Error("delete failed");
+      // The file vanishing from the list (and the count dropping) is the feedback.
+      setUploadedDocs((prev) => prev.filter((d) => d !== name));
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: `I couldn't delete "${name}". Please try again.` },
+      ]);
+    } finally {
+      setDeletingDoc(null);
+      setConfirmDelete(null);
+    }
   };
 
   const handleSend = async () => {
@@ -651,6 +702,77 @@ if (!token || isTokenExpired(token)) {
 
         {/* Spacer keeps the upload and account buttons on the right */}
         <div className="flex-1" />
+
+        {/* My documents */}
+        {token && (
+          <div className="relative flex-shrink-0">
+            <button
+              onClick={() => {
+                setShowDocs((prev) => !prev);
+                setConfirmDelete(null);
+              }}
+              className="flex items-center gap-1.5 rounded-full border border-[#DDD9D0] bg-white px-3.5 py-1.5 text-xs font-medium text-[#6B6B6B] shadow-sm transition hover:border-[#C4DFE0] hover:bg-[#EAF3F3] hover:text-[#2D6A6A]"
+            >
+              <FileIcon /> My documents ({uploadedDocs.length})
+            </button>
+            {showDocs && (
+              <div className="absolute right-0 top-10 z-20 w-72 rounded-xl border border-[#DDD9D0] bg-white py-2 shadow-lg">
+                {uploadedDocs.length === 0 ? (
+                  <p className="px-3 py-2 text-[12.5px] text-[#9A968C]">
+                    No documents yet. Upload a PDF to get started.
+                  </p>
+                ) : (
+                  <ul className="max-h-72 overflow-y-auto">
+                    {uploadedDocs.map((doc) => (
+                      <li
+                        key={doc}
+                        className="flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-[#F5F3EF]"
+                      >
+                        <span
+                          title={doc}
+                          className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-[#1C1C1E]"
+                        >
+                          <span className="flex-shrink-0 text-[#2D6A6A]">
+                            <FileIcon />
+                          </span>
+                          <span className="truncate">{doc}</span>
+                        </span>
+
+                        {confirmDelete === doc ? (
+                          <span className="flex flex-shrink-0 items-center gap-1">
+                            <button
+                              onClick={() => handleDeleteDocument(doc)}
+                              disabled={deletingDoc === doc}
+                              className="rounded-md bg-red-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                            >
+                              {deletingDoc === doc ? "Deleting…" : "Delete"}
+                            </button>
+                            <button
+                              onClick={() => setConfirmDelete(null)}
+                              disabled={deletingDoc === doc}
+                              className="rounded-md border border-[#DDD9D0] px-2 py-0.5 text-[11px] text-[#6B6B6B] hover:bg-white"
+                            >
+                              Cancel
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmDelete(doc)}
+                            aria-label={`Delete ${doc}`}
+                            title="Delete this document"
+                            className="flex-shrink-0 rounded-md p-1 text-[#9A968C] transition hover:bg-red-50 hover:text-red-600"
+                          >
+                            <TrashIcon />
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Upload button */}
         <label className="flex flex-shrink-0 cursor-pointer items-center gap-1.5 rounded-full border border-[#DDD9D0] bg-white px-3.5 py-1.5 text-xs font-medium text-[#6B6B6B] shadow-sm transition hover:border-[#C4DFE0] hover:bg-[#EAF3F3] hover:text-[#2D6A6A]">
