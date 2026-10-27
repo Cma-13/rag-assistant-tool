@@ -1,6 +1,12 @@
 "use client";
 
 import { useState } from "react";
+import { GoogleOAuthProvider, GoogleLogin } from "@react-oauth/google";
+
+// The Client ID is public (it is not a secret), so it is safe to keep here.
+const GOOGLE_CLIENT_ID =
+  process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ??
+  "972255011251-1cok0vt59jiolcut4a8v74mump93vmb6.apps.googleusercontent.com";
 
 interface AuthModalProps {
   onClose: () => void;
@@ -39,6 +45,32 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
       }
 
       onAuthSuccess(data.access_token, email);
+    } catch {
+      setError("Couldn't reach the server. Please try again.");
+      setLoading(false);
+    }
+  };
+
+  const handleGoogle = async (credential?: string) => {
+    if (!credential) {
+      setError("Google sign-in failed. Please try again.");
+      return;
+    }
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch("http://127.0.0.1:8000/auth/google", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credential }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.detail ?? "Google sign-in failed. Please try again.");
+        setLoading(false);
+        return;
+      }
+      onAuthSuccess(data.access_token, data.email);
     } catch {
       setError("Couldn't reach the server. Please try again.");
       setLoading(false);
@@ -102,6 +134,23 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
                 : "Sign up"}
           </button>
         </form>
+
+        <div className="my-4 flex items-center gap-3 text-[12px] text-[#9A968C]">
+          <span className="h-px flex-1 bg-[#E0DBD3]" />
+          or
+          <span className="h-px flex-1 bg-[#E0DBD3]" />
+        </div>
+
+        <div className="flex justify-center">
+          <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+            <GoogleLogin
+              onSuccess={(res) => handleGoogle(res.credential)}
+              onError={() => setError("Google sign-in failed. Please try again.")}
+              text={mode === "login" ? "continue_with" : "signup_with"}
+              width="300"
+            />
+          </GoogleOAuthProvider>
+        </div>
 
         <p className="mt-4 text-center text-[13px] text-[#6B6B6B]">
           {mode === "login" ? (
