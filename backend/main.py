@@ -182,3 +182,24 @@ def query_documents(request: QueryRequest, current_user: dict | None = Depends(g
 @app.get("/documents")
 def get_documents(current_user: dict = Depends(get_current_user)):
     return {"documents": list_documents(current_user["user_id"])}
+
+
+@app.delete("/documents")
+def delete_document(name: str, current_user: dict = Depends(get_current_user)):
+    """Remove one of the signed-in user's documents (all its chunks).
+    The user_id check means nobody can delete another user's file."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM document_chunks WHERE source_file = %s AND user_id = %s",
+        (name, current_user["user_id"])
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    return {"deleted": name, "chunks_removed": deleted}
