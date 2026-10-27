@@ -8,6 +8,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pipeline import agent_query
 from fastapi import Depends, HTTPException, Header
 from auth import hash_password, verify_password, create_access_token, decode_access_token
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
+from dotenv import load_dotenv
+
+load_dotenv()
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 
 app = FastAPI()
 
@@ -19,6 +25,10 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class GoogleLoginRequest(BaseModel):
+    credential: str  # the ID token Google gives the browser after the user picks an account
 
 
 def get_current_user(authorization: str = Header(None)):
@@ -68,12 +78,52 @@ def login(request: LoginRequest):
     cur.close()
     conn.close()
 
+    if row and not row[1]:
+        raise HTTPException(status_code=400, detail="This account uses Google sign-in. Please use 'Continue with Google'.")
+
     if not row or not verify_password(request.password, row[1]):
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
 
     user_id = row[0]
     token = create_access_token({"user_id": user_id, "email": request.email})
     return {"access_token": token, "token_type": "bearer"}
+
+@app.post("/auth/google")
+def google_login(request: GoogleLoginRequest):
+    """Sign in (or sign up) with Google. The browser sends the ID token from Google;
+    we check it with Google, then find or create the user by email and
+    return our own login token, exactly like a normal login."""
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="Google sign-in is not set up on the server.")
+
+    try:
+        info = google_id_token.verify_oauth2_token(
+            request.credential, google_requests.Request(), GOOGLE_CLIENT_ID
+        )
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Google sign-in failed. Please try again.")
+
+    email = info.get("email")
+    if not email or not info.get("email_verified"):
+        raise HTTPException(status_code=401, detail="Your Google email is not verified.")
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+    row = cur.fetchone()
+    if row:
+        user_id = row[0]
+    else:
+        # Google users have no password, so password_hash is left empty (NULL)
+        cur.execute("INSERT INTO users (email, password_hash) VALUES (%s, NULL) RETURNING id", (email,))
+        user_id = cur.fetchone()[0]
+        conn.commit()
+    cur.close()
+    conn.close()
+
+    token = create_access_token({"user_id": user_id, "email": email})
+    return {"access_token": token, "token_type": "bearer", "email": email}
+
 
 app.add_middleware(
     CORSMiddleware,
