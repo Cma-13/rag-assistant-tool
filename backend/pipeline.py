@@ -204,34 +204,78 @@ def _heading_of(line):
     return core if _HEADING_RE.match(core) else None
 
 
-def chunk_text(text, chunk_size=500, chunk_overlap=50):
-    """Split a document into small overlapping pieces, keeping each section heading with its text, so they can be searched."""
+_PAGE_MARKER = re.compile(r"^--- Page (\d+) ---$")
+
+
+def chunk_text_with_pages(text, chunk_size=500, chunk_overlap=50):
+    """Split a document into small overlapping pieces, keeping each section heading with its text, so they can be searched.
+    Returns a list of (chunk_text, page_number): the page that holds most of the chunk,
+    read from the '--- Page N ---' markers that ocr_pdf puts in the text."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", "। ", " ", ""]
+        separators=["\n\n", "\n", "\u0964 ", " ", ""]
     )
 
-    # 1. Split the document into sections at heading lines
+    # 1. Split the document into sections at heading lines, remembering which
+    #    page each section starts on
     sections, heading, body = [], None, []
+    current_page = 1
+    section_page = 1
     for line in text.split("\n"):
+        m = _PAGE_MARKER.match(line.strip())
+        if m:
+            current_page = int(m.group(1))
         h = _heading_of(line)
         if h:
-            sections.append((heading, "\n".join(body)))
+            sections.append((heading, "\n".join(body), section_page))
             heading, body = h, []
+            section_page = current_page
         else:
             body.append(line)
-    sections.append((heading, "\n".join(body)))
+    sections.append((heading, "\n".join(body), section_page))
 
     # 2. Chunk each section on its own, keeping the heading with every chunk
     chunks = []
-    for heading, body in sections:
+    for heading, body, start_page in sections:
         body = body.strip()
         if not body:
             continue
+
+        # where each page marker sits inside this section's text
+        markers, offset = [], 0
+        for line in body.split("\n"):
+            m = _PAGE_MARKER.match(line.strip())
+            if m:
+                markers.append((offset, int(m.group(1))))
+            offset += len(line) + 1
+
+        search_from = 0
         for piece in splitter.split_text(body):
-            chunks.append(f"{heading}\n{piece}" if heading else piece)
+            pos = body.find(piece, search_from)
+            if pos == -1:
+                pos = search_from
+            else:
+                search_from = pos + 1
+            # A chunk can run over a page break: use the page that holds most of it.
+            end = pos + len(piece)
+            share = {}
+            seg_start, seg_page = pos, start_page
+            for marker_pos, marker_page in markers:
+                if marker_pos <= pos:
+                    seg_page = marker_page
+                elif marker_pos < end:
+                    share[seg_page] = share.get(seg_page, 0) + (marker_pos - seg_start)
+                    seg_start, seg_page = marker_pos, marker_page
+            share[seg_page] = share.get(seg_page, 0) + (end - seg_start)
+            page = max(share, key=lambda pg: (share[pg], -pg))
+            chunks.append((f"{heading}\n{piece}" if heading else piece, page))
     return chunks
+
+
+def chunk_text(text, chunk_size=500, chunk_overlap=50):
+    """Same as chunk_text_with_pages, but only the chunk texts."""
+    return [c for c, _ in chunk_text_with_pages(text, chunk_size, chunk_overlap)]
 
 
 def embed_chunks(chunks):
@@ -239,16 +283,19 @@ def embed_chunks(chunks):
     return model.encode(prefixed_chunks)
 
 
-def store_chunks(source_file, chunks, embeddings, content_hash, user_id):
+def store_chunks(source_file, chunks, embeddings, content_hash, user_id, pages=None):
+    """Save the chunks. `pages` (optional) is the page number of each chunk."""
+    if pages is None:
+        pages = [None] * len(chunks)
     conn = get_connection()
     cur = conn.cursor()
-    for chunk, embedding in zip(chunks, embeddings):
+    for chunk, embedding, page in zip(chunks, embeddings, pages):
         cur.execute(
             """
-            INSERT INTO document_chunks (source_file, chunk_text, embedding, content_hash, user_id)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO document_chunks (source_file, page_number, chunk_text, embedding, content_hash, user_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (source_file, chunk, embedding.tolist(), content_hash, user_id)
+            (source_file, page, chunk, embedding.tolist(), content_hash, user_id)
         )
     conn.commit()
     cur.close()
@@ -879,6 +926,17 @@ _NO_ANSWER = re.compile(
     r"wasn'?t able|unable to find|no (mention|details|data)|not (specified|provided|listed)", re.IGNORECASE)
 
 
+def _answer_tokens(answer):
+    """The words and numbers of an answer that are worth looking for in documents."""
+    # The model often writes dates and numbers with special non-breaking
+    # hyphens/spaces, which would never match the document text.
+    answer = re.sub(r"[\u2010-\u2015\u2212]", "-", answer)
+    answer = re.sub(r"[\u00a0\u202f\u2009]", " ", answer)
+    tokens = {t for t in re.findall(r"[a-z0-9][a-z0-9.,\-]{3,}", answer.lower())}
+    tokens = {t.strip(".,-") for t in tokens} - _SOURCE_STOPWORDS
+    return {t for t in tokens if len(t) >= 4 or any(c.isdigit() for c in t)}
+
+
 def _sources_used(answer, chunks, max_sources=3):
     """Which documents did the answer really come from? Retrieval pulls chunks
     from many documents, but the answer usually uses only one or two. A
@@ -899,13 +957,7 @@ def _sources_used(answer, chunks, max_sources=3):
     if not texts:
         return []
 
-    # The model often writes dates and numbers with special non-breaking
-    # hyphens/spaces, which would never match the document text.
-    answer = re.sub(r"[\u2010-\u2015\u2212]", "-", answer)
-    answer = re.sub(r"[\u00a0\u202f\u2009]", " ", answer)
-    tokens = {t for t in re.findall(r"[a-z0-9][a-z0-9.,\-]{3,}", answer.lower())}
-    tokens = {t.strip(".,-") for t in tokens} - _SOURCE_STOPWORDS
-    tokens = {t for t in tokens if len(t) >= 4 or any(c.isdigit() for c in t)}
+    tokens = _answer_tokens(answer)
 
     scores = {}
     for doc, text in texts.items():
@@ -920,6 +972,50 @@ def _sources_used(answer, chunks, max_sources=3):
         return []
     keep = [d for d, sc in sorted(scores.items(), key=lambda x: -x[1]) if sc >= 0.4 * best]
     return keep[:max_sources]
+
+
+def _page_numbers(chunk_ids):
+    """{chunk id: page number} for chunks that have one stored."""
+    ids = list({i for i in chunk_ids if i is not None})
+    if not ids:
+        return {}
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, page_number FROM document_chunks WHERE id = ANY(%s) AND page_number IS NOT NULL", (ids,))
+    found = {row[0]: row[1] for row in cur.fetchall()}
+    cur.close()
+    conn.close()
+    return found
+
+
+def _source_refs(answer, chunks, docs, max_pages=3):
+    """For each source document, the page(s) the answer most likely came from.
+    `chunks` is a list of (chunk_id, document, text); `docs` the names chosen by
+    _sources_used. A chunk counts for the pages in proportion to how many
+    answer words it contains; only the best-matching chunk(s) of each document
+    are used. Documents without stored page numbers just get no pages."""
+    tokens = _answer_tokens(answer.replace("\u2019", "'").replace("\u2018", "'"))
+    try:
+        page_of = _page_numbers([c[0] for c in chunks])
+    except Exception:
+        page_of = {}
+
+    refs = []
+    for doc in docs:
+        scored = []
+        for cid, d, text in chunks:
+            if d != doc or cid not in page_of:
+                continue
+            low = text.lower()
+            score = sum(1 for t in tokens if t in low)
+            scored.append((score, page_of[cid]))
+        pages = []
+        if scored:
+            best = max(sc for sc, _ in scored)
+            if best > 0:
+                pages = sorted({pg for sc, pg in scored if sc >= 0.6 * best})[:max_pages]
+        refs.append({"file": doc, "pages": pages})
+    return refs
 
 
 SEARCH_TOOL = [{
@@ -970,6 +1066,7 @@ Rules you must follow:
 
     all_sources = []
     all_chunks = []  # (document, text) of everything the searches returned
+    all_hits = []    # (chunk id, document, text), used to find page numbers
     for step in range(max_steps):
         choice = "required" if step == 0 else ("none" if step == max_steps - 1 else "auto")
         response = groq_chat(messages, tools=SEARCH_TOOL, tool_choice=choice)
@@ -983,6 +1080,7 @@ Rules you must follow:
             results = add_following_chunks(results, user_id)
             all_sources.extend(r[1] for r in results)
             all_chunks.extend((r[1], r[2]) for r in results)
+            all_hits.extend((r[0], r[1], r[2]) for r in results)
 
             snippet = "\n\n".join(f"[{r[1]}] {r[2]}" for r in results) or "No relevant results found."
             messages.append({"role": "assistant", "content": msg.content or ""})
@@ -990,9 +1088,11 @@ Rules you must follow:
             continue
 
         if not msg.tool_calls:
+            docs_used = _sources_used(msg.content or "", all_chunks)
             return {
                 "answer": msg.content,
-                "sources": _sources_used(msg.content or "", all_chunks),
+                "sources": docs_used,
+                "source_refs": _source_refs(msg.content or "", all_hits, docs_used),
                 "action_taken": "AGENT_SEARCH",
             }
 
@@ -1013,6 +1113,7 @@ Rules you must follow:
 
             all_sources.extend(r[1] for r in results)
             all_chunks.extend((r[1], r[2]) for r in results)
+            all_hits.extend((r[0], r[1], r[2]) for r in results)
             snippet = "\n\n".join(f"[{r[1]}] {r[2]}" for r in results) or "No relevant results found."
             messages.append({
                 "role": "tool",
@@ -1273,4 +1374,5 @@ def agent_query(query, user_id, source_file=None, history=None):
 
         answer = generate_answer(query, results)
         sources = _sources_used(answer, [(src, text) for (_, src, text, _) in results])
-        return {"answer": answer, "sources": sources, "action_taken": "SEARCH"}
+        source_refs = _source_refs(answer, [(cid, src, text) for (cid, src, text, _) in results], sources)
+        return {"answer": answer, "sources": sources, "source_refs": source_refs, "action_taken": "SEARCH"}
