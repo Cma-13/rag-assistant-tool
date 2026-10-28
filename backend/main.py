@@ -1,6 +1,8 @@
 import shutil
 import os
+import json
 import hashlib
+from psycopg2.extras import Json
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -34,6 +36,10 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class ChatSaveRequest(BaseModel):
+    messages: list[dict]
 
 
 class GoogleLoginRequest(BaseModel):
@@ -315,3 +321,55 @@ def get_document_file(name: str, current_user: dict = Depends(get_current_user))
         raise HTTPException(status_code=404, detail="The original file isn't stored for this document. Delete it and upload it again to enable opening.")
 
     return FileResponse(path, media_type="application/pdf", filename=name, content_disposition_type="inline")
+
+
+MAX_SAVED_MESSAGES = 100
+MAX_SAVED_CHAT_BYTES = 2_000_000
+
+
+@app.get("/chat")
+def get_chat(current_user: dict = Depends(get_current_user)):
+    """The signed-in user's saved chat (empty list if there is none)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT messages FROM chat_history WHERE user_id = %s", (current_user["user_id"],))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return {"messages": row[0] if row else []}
+
+
+@app.put("/chat")
+def save_chat(request: ChatSaveRequest, current_user: dict = Depends(get_current_user)):
+    """Save the user's chat, replacing the previous copy. Only the latest
+    messages are kept, and the oldest are dropped if the chat gets too big."""
+    messages = request.messages[-MAX_SAVED_MESSAGES:]
+    while len(messages) > 1 and len(json.dumps(messages)) > MAX_SAVED_CHAT_BYTES:
+        messages = messages[1:]
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO chat_history (user_id, messages, updated_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (user_id) DO UPDATE SET messages = EXCLUDED.messages, updated_at = NOW()
+        """,
+        (current_user["user_id"], Json(messages))
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"saved": len(messages)}
+
+
+@app.delete("/chat")
+def clear_chat(current_user: dict = Depends(get_current_user)):
+    """Delete the user's saved chat."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM chat_history WHERE user_id = %s", (current_user["user_id"],))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"cleared": True}
