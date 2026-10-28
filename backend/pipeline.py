@@ -311,6 +311,15 @@ def _keyword_query(text):
     return " | ".join(dict.fromkeys(words))
 
 
+def _as_scope(source_file):
+    """A single file name, a list of names, or nothing -> a list of names (or None)."""
+    if not source_file:
+        return None
+    if isinstance(source_file, str):
+        return [source_file]
+    return [f for f in source_file if f] or None
+
+
 def retrieve_chunks(query, user_id, top_k=5, source_file=None, candidate_k=20):
     """Hybrid retrieval: semantic (vector) search + keyword (full-text) search,
     merged with Reciprocal Rank Fusion. Every returned row keeps its real
@@ -320,9 +329,10 @@ def retrieve_chunks(query, user_id, top_k=5, source_file=None, candidate_k=20):
 
     scope_sql = "user_id = %s"
     scope_params = [user_id]
-    if source_file:
-        scope_sql += " AND source_file = %s"
-        scope_params.append(source_file)
+    scope = _as_scope(source_file)  # one file name, or several
+    if scope:
+        scope_sql += " AND source_file = ANY(%s)"
+        scope_params.append(scope)
 
     conn = get_connection()
     cur = conn.cursor()
@@ -573,8 +583,9 @@ def _pick_documents_for_query(query, user_id, source_file, max_docs=3):
     the most relevant chunks in. When the question could fit several documents
     (for example two invoices), return up to max_docs so each gets its own
     labelled result instead of silently guessing one."""
-    if source_file:
-        return [source_file]
+    scope = _as_scope(source_file)
+    if scope:
+        return scope
 
     named = _documents_named_in_query(query, list_documents(user_id))
     if named:
@@ -1035,11 +1046,14 @@ SEARCH_TOOL = [{
 }]
 
 
-def agent_search_loop(query, user_id, history, max_steps=4):
+def agent_search_loop(query, user_id, history, max_steps=4, scope=None):
     """Agentic SEARCH: lets the model call search_documents more than once,
     e.g. once per document, so a question relevant to several documents
     doesn't lose one of them to a single top-k retrieval pass."""
     docs = list_documents(user_id)
+    scope = _as_scope(scope)
+    if scope:
+        docs = [d for d in docs if d in scope]  # the user picked these files: stay inside them
     doc_list_str = ", ".join(docs) if docs else "no documents uploaded yet"
 
     system_prompt = f"""You are a helpful assistant answering questions using the user's uploaded documents.
@@ -1076,7 +1090,7 @@ Rules you must follow:
         # If it skipped the tool on step 0, force one direct unscoped search
         # ourselves rather than letting the model answer ungrounded.
         if step == 0 and not msg.tool_calls:
-            results = retrieve_chunks(query, user_id, top_k=8)
+            results = retrieve_chunks(query, user_id, top_k=8, source_file=scope)
             results = add_following_chunks(results, user_id)
             all_sources.extend(r[1] for r in results)
             all_chunks.extend((r[1], r[2]) for r in results)
@@ -1103,9 +1117,13 @@ Rules you must follow:
         })
         for call in msg.tool_calls:
             args = json.loads(call.function.arguments)
+            wanted = args.get("source_file")
+            if scope:
+                # never search outside the files the user picked
+                wanted = [wanted] if wanted in scope else scope
             results = retrieve_chunks(
                 args.get("query", query), user_id, top_k=5,
-                source_file=args.get("source_file")
+                source_file=wanted
             )
             results = add_following_chunks(results, user_id)
             print(f"AGENT SEARCH: query={args.get('query')!r} source_file={args.get('source_file')!r} -> {len(results)} chunks from {sorted(set(r[1] for r in results))}")
@@ -1132,8 +1150,9 @@ def _resolve_summary_doc(query, user_id, source_file):
     """Which document does 'summarize the story' mean? An explicit selection,
     a filename typed in the question, the only document, or the document the
     search finds clearly best. Returns None when it is not clear."""
-    if source_file:
-        return source_file
+    scope = _as_scope(source_file)
+    if scope:
+        return scope[0] if len(scope) == 1 else None  # several selected: ask which one
     docs = list_documents(user_id)
     if len(docs) == 1:
         return docs[0]
@@ -1152,10 +1171,14 @@ def _resolve_summary_doc(query, user_id, source_file):
     return None
 
 
-def generate_overview(user_id, max_docs=8):
-    """One or two sentences about each uploaded document, using only the start of each."""
+def generate_overview(user_id, max_docs=8, only=None):
+    """One or two sentences about each uploaded document, using only the start of each.
+    `only` (optional) limits it to those document names."""
     lines = []
-    for doc in list_documents(user_id)[:max_docs]:
+    docs = list_documents(user_id)
+    if only:
+        docs = [d for d in docs if d in only]
+    for doc in docs[:max_docs]:
         chunks = get_document_chunks_in_order(doc, user_id, limit=6)
         if not chunks:
             continue
@@ -1194,6 +1217,7 @@ def add_following_chunks(results, user_id, max_total=10):
 def agent_query(query, user_id, source_file=None, history=None):
     """Entry point for every question: decides what kind of request it is (list documents, summarise, table or key-value extraction, chat, or document search) and answers it."""
     action = agent_decide_action(query)
+    scope = _as_scope(source_file)  # files the user picked for this question (none = all documents)
 
 
     # A follow-up like "explain that more simply" or "no, I mean RAG" has no
@@ -1226,12 +1250,12 @@ def agent_query(query, user_id, source_file=None, history=None):
         return {"answer": answer, "sources": [], "action_taken": "LIST"}
 
     elif action == "OVERVIEW":
-        return {"answer": generate_overview(user_id), "sources": [], "action_taken": "OVERVIEW"}
+        return {"answer": generate_overview(user_id, only=scope), "sources": [], "action_taken": "OVERVIEW"}
 
     elif action == "SUMMARY":
         target = _resolve_summary_doc(query, user_id, source_file)
         if not target:
-            docs = list_documents(user_id)
+            docs = scope or list_documents(user_id)
             answer = "Which document would you like summarized? You have: " + ", ".join(docs) if docs else "No documents have been uploaded yet."
             return {"answer": answer, "sources": [], "action_taken": "SUMMARY"}
         return {"answer": generate_summary(target, user_id), "sources": [target], "action_taken": "SUMMARY"}
@@ -1338,11 +1362,11 @@ def agent_query(query, user_id, source_file=None, history=None):
     else:  # SEARCH
         if LLM_PROVIDER == "groq":
             try:
-                return agent_search_loop(query, user_id, history)
+                return agent_search_loop(query, user_id, history, scope=scope)
             except Exception as e:
                 print(f"Agent loop failed ({type(e).__name__}): {e}")
 
-        results = retrieve_chunks(query, user_id, top_k=8, source_file=source_file)
+        results = retrieve_chunks(query, user_id, top_k=8, source_file=scope)
 
 
         if not results:
