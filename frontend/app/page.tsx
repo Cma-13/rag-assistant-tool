@@ -411,40 +411,79 @@ export default function Home() {
       .catch(() => {});
   }, [token]);
 
-  // ── Chat history: saved in this browser, one history per logged-in user ──
-  const historyKey = userEmail ? `chatHistory:${userEmail}` : null;
-  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  // ── Chat history: saved on the server, one history per user ──
+  // `chatReadyFor` is the user whose saved chat has been loaded. Nothing is
+  // saved before that, so a failed load can never overwrite the real history.
+  const localChatKey = userEmail ? `chatHistory:${userEmail}` : null;
+  const [chatReadyFor, setChatReadyFor] = useState<string | null>(null);
 
   // When a user is logged in (or logs in again), bring back their saved chat.
   useEffect(() => {
-    if (!historyKey) {
-      setLoadedKey(null);
+    if (!token || !userEmail) {
+      setChatReadyFor(null);
       return;
     }
-    try {
-      const raw = localStorage.getItem(historyKey);
-      setMessages(raw ? JSON.parse(raw) : []);
-    } catch {
-      setMessages([]);
-    }
-    setLoadedKey(historyKey);
-  }, [historyKey]);
+    let cancelled = false;
+    const oldLocalKey = `chatHistory:${userEmail}`;
+    const readLocal = (): Message[] => {
+      try {
+        const raw = localStorage.getItem(oldLocalKey);
+        return raw ? JSON.parse(raw) : [];
+      } catch {
+        return [];
+      }
+    };
 
-  // Save the chat after every change (only the last 100 messages are kept).
+    fetch("http://127.0.0.1:8000/chat", {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject()))
+      .then((data) => {
+        if (cancelled) return;
+        let saved: Message[] = Array.isArray(data.messages) ? data.messages : [];
+        // First time on the server: bring over the chat kept in this browser before.
+        if (saved.length === 0) saved = readLocal();
+        setMessages(saved);
+        try {
+          localStorage.removeItem(oldLocalKey);
+        } catch {}
+        setChatReadyFor(userEmail);
+      })
+      .catch(() => {
+        // Server not reachable: show the browser copy, but do not save anything.
+        if (!cancelled) setMessages(readLocal());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, userEmail]);
+
+  // Save the chat shortly after it changes (only the last 100 messages are kept).
   useEffect(() => {
-    if (!historyKey || loadedKey !== historyKey) return;
-    try {
-      localStorage.setItem(historyKey, JSON.stringify(messages.slice(-100)));
-    } catch {
-      /* storage full or blocked - the chat still works, it just won't be saved */
-    }
-  }, [messages, historyKey, loadedKey]);
+    if (!token || !userEmail || chatReadyFor !== userEmail) return;
+    const timer = setTimeout(() => {
+      fetch("http://127.0.0.1:8000/chat", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ messages: messages.slice(-100) }),
+      }).catch(() => {
+        /* saving failed - the chat still works, it just won't be saved this time */
+      });
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [messages, token, userEmail, chatReadyFor]);
 
   const handleClearChat = () => {
     setMessages([]);
-    if (historyKey) {
+    if (token) {
+      fetch("http://127.0.0.1:8000/chat", {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+    if (localChatKey) {
       try {
-        localStorage.removeItem(historyKey);
+        localStorage.removeItem(localChatKey);
       } catch {}
     }
   };
@@ -725,7 +764,7 @@ export default function Home() {
     setToken(null);
     setUserEmail(null);
     setUploadedDocs([]);
-    setMessages([]); // the saved chat stays in the browser for the next login
+    setMessages([]); // the saved chat stays on the server for the next login
   };
 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
