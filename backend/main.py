@@ -2,8 +2,9 @@ import shutil
 import os
 import hashlib
 from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from pipeline import ocr_pdf, chunk_text, embed_chunks, store_chunks, retrieve_chunks, generate_answer, get_connection, list_documents
+from pipeline import ocr_pdf, chunk_text_with_pages, embed_chunks, store_chunks, retrieve_chunks, generate_answer, get_connection, list_documents
 from fastapi.middleware.cors import CORSMiddleware
 from pipeline import agent_query
 from fastapi import Depends, HTTPException, Header
@@ -16,6 +17,14 @@ load_dotenv()
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 
 app = FastAPI()
+
+# Uploaded PDFs are kept here (one folder per user, named by the file's hash),
+# so a source can be opened from the chat later.
+UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+
+
+def pdf_path(user_id, content_hash):
+    return os.path.join(UPLOAD_DIR, str(user_id), f"{content_hash}.pdf")
 
 class SignupRequest(BaseModel):
     email: str
@@ -198,16 +207,23 @@ async def upload_document(file: UploadFile = File(...), current_user: dict = Dep
     cur.close()
     conn.close()
 
-    temp_path = f"temp_{storage_filename}"
-    with open(temp_path, "wb") as buffer:
+    saved_path = pdf_path(user_id, content_hash)
+    os.makedirs(os.path.dirname(saved_path), exist_ok=True)
+    with open(saved_path, "wb") as buffer:
         buffer.write(content)
 
-    text = ocr_pdf(temp_path)
-    chunks = chunk_text(text)
-    embeddings = embed_chunks(chunks)
-    store_chunks(storage_filename, chunks, embeddings, content_hash, user_id)
-
-    os.remove(temp_path)
+    try:
+        text = ocr_pdf(saved_path)
+        chunk_pairs = chunk_text_with_pages(text)
+        chunks = [c for c, _ in chunk_pairs]
+        pages = [pg for _, pg in chunk_pairs]
+        embeddings = embed_chunks(chunks)
+        store_chunks(storage_filename, chunks, embeddings, content_hash, user_id, pages=pages)
+    except Exception:
+        # don't keep a file that never made it into the knowledge base
+        if os.path.exists(saved_path):
+            os.remove(saved_path)
+        raise
 
     return {"filename": storage_filename, "chunks_stored": len(chunks)}
 
@@ -225,6 +241,7 @@ def query_documents(request: QueryRequest, current_user: dict | None = Depends(g
         "question": request.question,
         "answer": result["answer"],
         "sources": result["sources"],
+        "source_refs": result.get("source_refs"),  # [{"file": ..., "pages": [3]}] for SEARCH answers, else null
         "action_taken": result["action_taken"],
         "structured": result.get("structured"),  # {"pairs": [...], "tables": [...], "note": "..."} for TABLE answers, else null
     }
@@ -238,11 +255,17 @@ def get_documents(current_user: dict = Depends(get_current_user)):
 def delete_document(name: str, current_user: dict = Depends(get_current_user)):
     """Remove one of the signed-in user's documents (all its chunks).
     The user_id check means nobody can delete another user's file."""
+    user_id = current_user["user_id"]
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
+        "SELECT content_hash FROM document_chunks WHERE source_file = %s AND user_id = %s LIMIT 1",
+        (name, user_id)
+    )
+    row = cur.fetchone()
+    cur.execute(
         "DELETE FROM document_chunks WHERE source_file = %s AND user_id = %s",
-        (name, current_user["user_id"])
+        (name, user_id)
     )
     deleted = cur.rowcount
     conn.commit()
@@ -252,4 +275,35 @@ def delete_document(name: str, current_user: dict = Depends(get_current_user)):
     if deleted == 0:
         raise HTTPException(status_code=404, detail="Document not found.")
 
+    # also remove the stored PDF (older documents have none)
+    if row and row[0]:
+        try:
+            os.remove(pdf_path(user_id, row[0]))
+        except OSError:
+            pass
+
     return {"deleted": name, "chunks_removed": deleted}
+
+
+@app.get("/documents/file")
+def get_document_file(name: str, current_user: dict = Depends(get_current_user)):
+    """Send back the stored PDF of one of the signed-in user's documents."""
+    user_id = current_user["user_id"]
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT content_hash FROM document_chunks WHERE source_file = %s AND user_id = %s LIMIT 1",
+        (name, user_id)
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    path = pdf_path(user_id, row[0]) if row[0] else None
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="The original file isn't stored for this document. Delete it and upload it again to enable opening.")
+
+    return FileResponse(path, media_type="application/pdf", filename=name, content_disposition_type="inline")
