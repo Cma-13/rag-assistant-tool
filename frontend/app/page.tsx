@@ -33,6 +33,7 @@ interface Message {
   content: string;
   structured?: Structured | null;
   sources?: string[];
+  sourceRefs?: { file: string; pages: number[] }[];
 }
 
 // Numbers (with commas, decimals, %) line up on the right in tables.
@@ -482,6 +483,41 @@ export default function Home() {
     }
   };
 
+  // Open a stored PDF in a new tab (at a given page, if we know it).
+  // The file is fetched with the login token and shown from memory, because a
+  // plain link could not carry the token.
+  const openDocument = async (name: string, page?: number) => {
+    if (!token || isTokenExpired(token)) {
+      handleSessionExpired();
+      return;
+    }
+    // Open the tab right away: browsers block tabs opened after a delay.
+    const win = window.open("", "_blank");
+    if (win) win.document.title = "Opening…";
+    const fail = (text: string) => {
+      win?.close();
+      setMessages((prev) => [...prev, { role: "assistant", content: text }]);
+    };
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:8000/documents/file?name=${encodeURIComponent(name)}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        fail(data.detail ?? `I couldn't open "${name}".`);
+        return;
+      }
+      const url = URL.createObjectURL(await res.blob());
+      const target = page ? `${url}#page=${page}` : url;
+      if (win) win.location.href = target;
+      else window.open(target, "_blank");
+      setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
+    } catch {
+      fail(`I couldn't open "${name}". Please try again.`);
+    }
+  };
+
   const handleSend = async () => {
     if (!input.trim() || loading) return;
 
@@ -520,6 +556,7 @@ export default function Home() {
           content: data.answer,
           structured: data.structured?.results?.length ? data.structured : null,
           sources: Array.isArray(data.sources) ? data.sources : [],
+          sourceRefs: Array.isArray(data.source_refs) ? data.source_refs : [],
         },
       ]);
     } catch {
@@ -728,15 +765,16 @@ if (!token || isTokenExpired(token)) {
                         key={doc}
                         className="flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-[#F5F3EF]"
                       >
-                        <span
-                          title={doc}
-                          className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-[#1C1C1E]"
+                        <button
+                          onClick={() => openDocument(doc)}
+                          title={`Open ${doc}`}
+                          className="flex min-w-0 items-center gap-1.5 text-left text-[12.5px] text-[#1C1C1E] hover:text-[#2D6A6A] hover:underline"
                         >
                           <span className="flex-shrink-0 text-[#2D6A6A]">
                             <FileIcon />
                           </span>
                           <span className="truncate">{doc}</span>
-                        </span>
+                        </button>
 
                         {confirmDelete === doc ? (
                           <span className="flex flex-shrink-0 items-center gap-1">
@@ -917,18 +955,29 @@ if (!token || isTokenExpired(token)) {
                   {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (
                     <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-[#EFEBE4] pt-2">
                       <span className="text-[11px] text-[#9A968C]">Sources:</span>
-                      {msg.sources.map((src) => (
-                        <span
-                          key={src}
-                          title={src}
-                          className="flex max-w-[220px] items-center gap-1 rounded-full border border-[#C4DFE0] bg-[#EAF3F3] px-2 py-0.5 text-[11px] font-medium text-[#2D6A6A]"
-                        >
-                          <span className="flex-shrink-0">
-                            <FileIcon />
-                          </span>
-                          <span className="truncate">{src}</span>
-                        </span>
-                      ))}
+                      {msg.sources.map((src) => {
+                        const pages =
+                          msg.sourceRefs?.find((r) => r.file === src)?.pages ?? [];
+                        const pageText = pages.length
+                          ? ` · p. ${pages.join(", ")}`
+                          : "";
+                        return (
+                          <button
+                            key={src}
+                            onClick={() => openDocument(src, pages[0])}
+                            title={`Open ${src}${pages.length ? ` at page ${pages[0]}` : ""}`}
+                            className="flex max-w-[260px] items-center gap-1 rounded-full border border-[#C4DFE0] bg-[#EAF3F3] px-2 py-0.5 text-[11px] font-medium text-[#2D6A6A] transition hover:border-[#2D6A6A] hover:bg-[#DCEDED]"
+                          >
+                            <span className="flex-shrink-0">
+                              <FileIcon />
+                            </span>
+                            <span className="truncate">{src}</span>
+                            {pageText && (
+                              <span className="flex-shrink-0 text-[#4A8A8A]">{pageText}</span>
+                            )}
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
