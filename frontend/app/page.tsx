@@ -34,7 +34,10 @@ interface Message {
   structured?: Structured | null;
   sources?: string[];
   sourceRefs?: { file: string; pages: number[] }[];
+  attachments?: string[]; // PDFs attached to this question (shown as file cards)
 }
+
+const MAX_ATTACHMENTS = 10;
 
 // Numbers (with commas, decimals, %) line up on the right in tables.
 const NUMERIC_CELL = /^[-+]?[\d,]*\.?\d+%?$/;
@@ -336,6 +339,24 @@ function TrashIcon() {
   );
 }
 
+function PlusIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
 function BotIcon() {
   return (
     <svg
@@ -361,13 +382,10 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedDocs, setUploadedDocs] = useState<string[]>([]);
-  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -376,6 +394,8 @@ export default function Home() {
   const [showDocs, setShowDocs] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deletingDoc, setDeletingDoc] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<File[]>([]);
+  const [busyLabel, setBusyLabel] = useState<string | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -518,14 +538,9 @@ export default function Home() {
     }
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || loading) return;
-
-    const userMessage: Message = { role: "user", content: input };
-    setMessages((prev) => [...prev, userMessage]);
-    setInput("");
-    setLoading(true);
-
+  // Ask the backend a question. `scope` limits it to some documents.
+  // `past` is the chat as it was before this question (for follow-ups).
+  const askQuestion = async (question: string, past: Message[], scope?: string[]) => {
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -533,11 +548,11 @@ export default function Home() {
       // Build recent history from the last few exchanges (question/answer pairs)
       // so the backend can resolve follow-ups like "that" or "the second one".
       const recentHistory: { question: string; answer: string }[] = [];
-      for (let i = 0; i < messages.length - 1; i++) {
-        if (messages[i].role === "user" && messages[i + 1]?.role === "assistant") {
+      for (let i = 0; i < past.length - 1; i++) {
+        if (past[i].role === "user" && past[i + 1]?.role === "assistant") {
           recentHistory.push({
-            question: messages[i].content,
-            answer: messages[i + 1].content,
+            question: past[i].content,
+            answer: past[i + 1].content,
           });
         }
       }
@@ -546,7 +561,11 @@ export default function Home() {
       const res = await fetch("http://127.0.0.1:8000/query", {
         method: "POST",
         headers,
-        body: JSON.stringify({ question: input, history: lastFewTurns }),
+        body: JSON.stringify({
+          question,
+          history: lastFewTurns,
+          ...(scope && scope.length ? { source_files: scope } : {}),
+        }),
       });
       const data = await res.json();
       setMessages((prev) => [
@@ -567,9 +586,129 @@ export default function Home() {
           content: "I couldn't reach the server. Please try again.",
         },
       ]);
+    }
+  };
+
+  // Upload one PDF without adding chat messages. Returns the name it is stored under.
+  const uploadOne = async (
+    file: File,
+  ): Promise<{ name?: string; already?: boolean; error?: string }> => {
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("http://127.0.0.1:8000/upload", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      const data = await res.json();
+      if (!res.ok || !data.filename) {
+        return { error: data.detail ?? `I couldn't process "${file.name}".` };
+      }
+      setUploadedDocs((prev) => [...new Set([...prev, data.filename])]);
+      return { name: data.filename, already: data.chunks_stored === 0 };
+    } catch {
+      return { error: `I couldn't process "${file.name}".` };
+    }
+  };
+
+  const handleSend = async () => {
+    if (loading) return;
+    const question = input.trim();
+    const files = attachments;
+    if (!question && files.length === 0) return;
+
+    if (files.length > 0 && (!token || isTokenExpired(token))) {
+      handleSessionExpired();
+      return;
+    }
+
+    const past = messages;
+    const questionIndex = past.length;
+    if (question) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "user",
+          content: question,
+          ...(files.length ? { attachments: files.map((f) => f.name) } : {}),
+        },
+      ]);
+    }
+    setInput("");
+    setAttachments([]);
+    setLoading(true);
+
+    try {
+      let scope: string[] | undefined;
+      if (files.length > 0) {
+        // Read the attached files first (they join the knowledge base).
+        const stored: string[] = [];
+        const added: string[] = [];
+        const already: string[] = [];
+        for (let i = 0; i < files.length; i++) {
+          setBusyLabel(
+            files.length > 1
+              ? `Reading document ${i + 1} of ${files.length}…`
+              : "Reading your document…",
+          );
+          const result = await uploadOne(files[i]);
+          if (result.name) {
+            stored.push(result.name);
+            (result.already ? already : added).push(result.name);
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: result.error ?? "I couldn't process that file." },
+            ]);
+          }
+        }
+        setBusyLabel(null);
+
+        if (!question) {
+          // Only files, no question: just confirm they were added.
+          const lines: string[] = [];
+          if (added.length === 1) lines.push(`Uploaded "${added[0]}"`);
+          if (added.length > 1)
+            lines.push(`Uploaded ${added.length} documents: ${added.map((n) => `"${n}"`).join(", ")}`);
+          already.forEach((n) => lines.push(`"${n}" is already uploaded.`));
+          if (lines.length) {
+            setMessages((prev) => [...prev, { role: "assistant", content: lines.join("\n") }]);
+          }
+          return;
+        }
+
+        if (stored.length === 0) return; // nothing could be read, nothing to ask about
+        scope = [...new Set(stored)];
+        // show the names the documents are really stored under
+        setMessages((prev) =>
+          prev.map((m, i) => (i === questionIndex ? { ...m, attachments: scope } : m)),
+        );
+      }
+      await askQuestion(question, past, scope);
     } finally {
+      setBusyLabel(null);
       setLoading(false);
     }
+  };
+
+  // Put PDFs next to the question box (they are uploaded when the message is sent).
+  const attachFiles = (files: File[]) => {
+    const pdfs = files.filter((f) => f.name.toLowerCase().endsWith(".pdf"));
+    if (pdfs.length < files.length) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "Only PDF files are supported. Please attach a valid PDF." },
+      ]);
+    }
+    setAttachments((prev) => [...prev, ...pdfs].slice(0, MAX_ATTACHMENTS));
+    inputRef.current?.focus();
+  };
+
+  const handleAttach = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files.length > 0) attachFiles(Array.from(files));
+    e.target.value = "";
   };
 
   const handleAuthSuccess = (newToken: string, email: string) => {
@@ -589,87 +728,12 @@ export default function Home() {
     setMessages([]); // the saved chat stays in the browser for the next login
   };
 
-  const processFile = async (file: File) => {
-    if (!file.name.toLowerCase().endsWith(".pdf")) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Only PDF files are supported. Please upload a valid PDF.",
-        },
-      ]);
-      return;
-    }
-    setUploading(true);
-    const formData = new FormData();
-    formData.append("file", file);
-
-    try {
-if (!token || isTokenExpired(token)) {
-        handleSessionExpired();
-        setUploading(false);
-        return;
-      }
-
-
-      const res = await fetch("http://127.0.0.1:8000/upload", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      });
-      const data = await res.json();
-
-      if (data.chunks_stored === 0) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content: `"${file.name}" is already uploaded.`,
-          },
-        ]);
-      } else {
-        setUploadedDocs((prev) => [...new Set([...prev, data.filename])]);
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content: `Uploaded "${data.filename}"`,
-          },
-        ]);
-      }
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: "I couldn't process that file." },
-      ]);
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    await processFiles(Array.from(files));
-    e.target.value = "";
-  };
-
-  const processFiles = async (files: File[]) => {
-    for (let i = 0; i < files.length; i++) {
-      setUploadProgress(
-        files.length > 1 ? `Uploading ${i + 1} of ${files.length}…` : null,
-      );
-      await processFile(files[i]);
-    }
-    setUploadProgress(null);
-  };
-
-  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setIsDragging(false);
     const files = e.dataTransfer.files;
     if (files && files.length > 0) {
-      await processFiles(Array.from(files));
+      attachFiles(Array.from(files));
     }
   };
 
@@ -812,27 +876,6 @@ if (!token || isTokenExpired(token)) {
           </div>
         )}
 
-        {/* Upload button */}
-        <label className="flex flex-shrink-0 cursor-pointer items-center gap-1.5 rounded-full border border-[#DDD9D0] bg-white px-3.5 py-1.5 text-xs font-medium text-[#6B6B6B] shadow-sm transition hover:border-[#C4DFE0] hover:bg-[#EAF3F3] hover:text-[#2D6A6A]">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf"
-            multiple
-            onChange={handleUpload}
-            disabled={uploading}
-            className="hidden"
-          />
-          {uploading ? (
-            <span className="uploading-pulse flex items-center gap-1.5">
-              <UploadIcon /> {uploadProgress ?? "Processing…"}
-            </span>
-          ) : (
-            <span className="flex items-center gap-1.5">
-              <UploadIcon /> Upload PDFs
-            </span>
-          )}
-        </label>
         {userEmail ? (
           <div className="relative flex-shrink-0">
             <button
@@ -906,7 +949,7 @@ if (!token || isTokenExpired(token)) {
                   What&apos;s on the agenda today?
                 </h2>
                 <p className="max-w-xs text-sm leading-relaxed text-[#9A968C]">
-                  Ask me anything, or upload a PDF to get started.
+                  Ask me anything, or attach a PDF with the + button to get started.
                 </p>
                 <div className="mt-7 flex flex-wrap justify-center gap-2">
                   {["Context-aware answers", "PDF documents"].map((feat) => (
@@ -934,6 +977,31 @@ if (!token || isTokenExpired(token)) {
                   </div>
                 )}
 
+                {msg.attachments && msg.attachments.length > 0 ? (
+                  <div className="flex max-w-[80%] flex-col items-end gap-1.5">
+                    {msg.attachments.map((name) => (
+                      <button
+                        key={name}
+                        onClick={() => openDocument(name)}
+                        title={`Open ${name}`}
+                        className="flex max-w-full items-center gap-2.5 rounded-xl border border-[#E0DBD3] bg-white px-3 py-2 text-left shadow-sm transition hover:border-[#2D6A6A]"
+                      >
+                        <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-red-50 text-[10px] font-bold text-red-600">
+                          PDF
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block truncate text-[13px] font-medium text-[#1C1C1E]">
+                            {name}
+                          </span>
+                          <span className="block text-[11px] text-[#9A968C]">PDF</span>
+                        </span>
+                      </button>
+                    ))}
+                    <div className="max-w-full rounded-2xl rounded-br-sm bg-[#2D6A6A] px-4 py-3 text-[14.5px] leading-relaxed text-white shadow-sm">
+                      {renderContent(msg.content)}
+                    </div>
+                  </div>
+                ) : (
                 <div
                   className={`${
                     msg.structured || parseBlocks(msg.content).some((b) => b.kind === "table")
@@ -981,6 +1049,7 @@ if (!token || isTokenExpired(token)) {
                     </div>
                   )}
                 </div>
+                )}
 
                 {/* User avatar */}
                 {msg.role === "user" && (
@@ -1002,6 +1071,9 @@ if (!token || isTokenExpired(token)) {
                     <span className="typing-dot inline-block h-2 w-2 rounded-full bg-[#9A968C]" />
                     <span className="typing-dot inline-block h-2 w-2 rounded-full bg-[#9A968C]" />
                     <span className="typing-dot inline-block h-2 w-2 rounded-full bg-[#9A968C]" />
+                    {busyLabel && (
+                      <span className="ml-2 text-[12.5px] text-[#9A968C]">{busyLabel}</span>
+                    )}
                   </span>
                 </div>
               </div>
@@ -1015,12 +1087,62 @@ if (!token || isTokenExpired(token)) {
         <div className="border-t border-[#DDD9D0] bg-[#F0EDE8] px-4 py-4 md:px-8">
           <div className="mx-auto max-w-3xl">
             <div
-              className={`flex items-center gap-2 rounded-2xl border bg-white px-4 py-2 shadow-sm transition-all duration-150 ${
-                uploadedDocs.length > 0
+              className={`rounded-2xl border bg-white px-4 py-2 shadow-sm transition-all duration-150 ${
+                uploadedDocs.length > 0 || attachments.length > 0
                   ? "border-[#DDD9D0] focus-within:border-[#2D6A6A] focus-within:shadow-[0_0_0_3px_rgba(45,106,106,0.10)]"
                   : "border-[#DDD9D0] opacity-60"
               }`}
             >
+              {/* PDFs attached to the next question */}
+              {attachments.length > 0 && (
+                <div className="flex flex-wrap gap-2 pb-2 pt-1">
+                  {attachments.map((file, i) => (
+                    <div
+                      key={`${file.name}-${i}`}
+                      className="flex max-w-[240px] items-center gap-2 rounded-xl border border-[#E0DBD3] bg-[#FAF8F5] py-1.5 pl-2 pr-1.5"
+                    >
+                      <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-red-50 text-[9px] font-bold text-red-600">
+                        PDF
+                      </span>
+                      <span className="truncate text-[12.5px] text-[#1C1C1E]" title={file.name}>
+                        {file.name}
+                      </span>
+                      <button
+                        onClick={() =>
+                          setAttachments((prev) => prev.filter((_, idx) => idx !== i))
+                        }
+                        aria-label={`Remove ${file.name}`}
+                        className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-[#9A968C] hover:bg-[#EFEBE4] hover:text-[#1C1C1E]"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+              <label
+                title={
+                  attachments.length >= MAX_ATTACHMENTS
+                    ? `You can attach up to ${MAX_ATTACHMENTS} PDFs at once`
+                    : "Attach PDFs"
+                }
+                className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl text-[#6B6B6B] transition ${
+                  loading || attachments.length >= MAX_ATTACHMENTS
+                    ? "cursor-not-allowed opacity-40"
+                    : "cursor-pointer hover:bg-[#EAF3F3] hover:text-[#2D6A6A]"
+                }`}
+              >
+                <input
+                  type="file"
+                  accept=".pdf"
+                  multiple
+                  onChange={handleAttach}
+                  disabled={loading || attachments.length >= MAX_ATTACHMENTS}
+                  className="hidden"
+                />
+                <PlusIcon />
+              </label>
               <input
                 ref={inputRef}
                 type="text"
@@ -1034,25 +1156,25 @@ if (!token || isTokenExpired(token)) {
                   e.key === "Enter" && !e.shiftKey && handleSend()
                 }
                 placeholder={
-                  uploading
-                    ? "Processing document…"
-                    : loading
-                      ? "Waiting for the previous answer…"
+                  loading
+                    ? "Waiting for the previous answer…"
+                    : attachments.length > 0
+                      ? "Ask something about the attached file, or just send to add it…"
                       : uploadedDocs.length > 0
                         ? "Ask anything about your knowledge base…"
-                        : "Say hi, or upload a PDF to ask about documents…"
+                        : "Say hi, or attach a PDF with + to ask about it…"
                 }
-                disabled={uploading}
                 className="flex-1 bg-transparent py-1.5 text-[14.5px] text-[#1C1C1E] placeholder-[#B0ABA2] outline-none disabled:cursor-not-allowed"
               />
               <button
                 onClick={handleSend}
-                disabled={uploading || loading || !input.trim()}
+                disabled={loading || (!input.trim() && attachments.length === 0)}
                 aria-label="Send message"
                 className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl bg-[#2D6A6A] text-white shadow-sm transition hover:bg-[#255757] active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 <SendIcon />
               </button>
+              </div>
             </div>
             <p className="mt-2 text-center text-[11px] text-[#B8B3A8]">
               Answers are based on your uploaded knowledge base.
