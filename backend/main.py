@@ -195,10 +195,16 @@ async def upload_document(file: UploadFile = File(...), current_user: dict = Dep
     already_exists = cur.fetchone()[0] > 0
 
     if already_exists:
+        # the name it is stored under may differ from the name of this upload
+        cur.execute(
+            "SELECT source_file FROM document_chunks WHERE content_hash = %s AND user_id = %s LIMIT 1",
+            (content_hash, user_id)
+        )
+        stored_name = cur.fetchone()[0]
         cur.close()
         conn.close()
         return {
-            "filename": file.filename,
+            "filename": stored_name,
             "chunks_stored": 0,
             "message": "This document (or an identical copy) is already in your knowledge base."
         }
@@ -231,12 +237,14 @@ async def upload_document(file: UploadFile = File(...), current_user: dict = Dep
 class QueryRequest(BaseModel):
     question: str
     source_file: str | None = None  # optional — omit to search the whole knowledge base
+    source_files: list[str] | None = None  # optional — limit the question to these documents (e.g. files just attached)
     history: list[dict] | None = None  # recent [{"question":..., "answer":...}, ...] for follow-ups
 
 @app.post("/query")
 def query_documents(request: QueryRequest, current_user: dict | None = Depends(get_optional_user)):
     user_id = current_user["user_id"] if current_user else None
-    result = agent_query(request.question, user_id, source_file=request.source_file, history=request.history)
+    scope = request.source_files or request.source_file
+    result = agent_query(request.question, user_id, source_file=scope, history=request.history)
     return {
         "question": request.question,
         "answer": result["answer"],
