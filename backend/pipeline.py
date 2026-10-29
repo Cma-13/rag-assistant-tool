@@ -383,7 +383,7 @@ def retrieve_chunks(query, user_id, top_k=5, source_file=None, candidate_k=20):
     best_ids = sorted(scores, key=scores.get, reverse=True)[:top_k]
     return [rows[i] for i in best_ids]
 
-def generate_answer(query, retrieved_chunks):
+def generate_answer(query, retrieved_chunks, elaborate=False):
     """Write the answer to a question using only the retrieved document passages."""
     # Group chunks by document (each document's chunks stay in original order)
     # and label each group, so the model can tell which document a fact is from.
@@ -396,6 +396,9 @@ def generate_answer(query, retrieved_chunks):
         for doc, chunks in by_doc.items()
     )
 
+    more_detail = ("The user wants a fuller answer than before: give a more detailed answer in several sentences, "
+                   "covering every relevant detail in the context.\n\n") if elaborate else ""
+
     prompt = f"""You are a helpful assistant answering questions based only on the provided context.
 The context is split into labeled documents. Details from one document must never be mixed into facts from another.
 Only state facts that are explicitly and directly written in the context. Do not infer causes, combine unrelated events, or guess at relationships between events that aren't clearly stated.
@@ -407,13 +410,13 @@ Never mention labels such as 'Table 1 on Page 1' in your answer. If the question
 Answer only if the context directly states the thing asked about. Do not guess from related details: a phone number of the seller is not the buyer's, and a black telephone does not tell you the colour of a door. If the context is about a different person, company or thing than the one asked about, say it is not stated.
 Write currency exactly as it appears in the context (for example Rs. or NPR); never change it to another symbol such as the rupee sign or a dollar sign.
 
-Context:
+{more_detail}Context:
 {context}
 
 Question: {query}
 
 Answer:"""
-    return llm_generate(prompt, num_predict=200, temperature=0.1)
+    return llm_generate(prompt, num_predict=350 if elaborate else 200, temperature=0.1)
 
 
 def list_documents(user_id):
@@ -803,6 +806,10 @@ def agent_decide_action(query):
     if _ABOUT_ASSISTANT.search(query):
         return "CHAT"
 
+    # "my name is Seema" / "what's my name?" are about the conversation, not the documents
+    if _is_user_fact(query) or _ABOUT_CONVERSATION.search(query):
+        return "CHAT"
+
     list_keywords = ["what documents", "which documents", "what files", "which files",
                       "list documents", "list files", "documents have you", "documents do you"]
     if any(keyword in query_lower for keyword in list_keywords) or _LIST_REQUEST.search(query):
@@ -884,7 +891,7 @@ _FOLLOWUP_HINTS = re.compile(
 # The CHAT/SEARCH classifier can't see the topic in these, so it calls them CHAT.
 _FOLLOWUP_REQUESTS = re.compile(
     r"\b(explain|simplif\w*|shorter|longer|elaborate|rephrase|summari[sz]e|clarify|"
-    r"more detail|in one sentence|i mean|i meant)\b"
+    r"more detail|in one sentence|i mean|i meant|why|tell me more|go on|continue|an example|for example)\b"
     r"|^(and|also|what about|how about)\b",
     re.IGNORECASE)
 
@@ -896,11 +903,11 @@ def rewrite_query(query, history):
         return query
 
     stripped = query.strip().lower().strip("!.? ")
-    if stripped in SKIP_REWRITE_PATTERNS or len(stripped) <= 3:
+    if stripped in SKIP_REWRITE_PATTERNS or len(stripped) <= 2:
         return query
 
     # Already standalone (no vague reference) -> leave it alone
-    if not _FOLLOWUP_HINTS.search(query.strip()):
+    if not (_FOLLOWUP_HINTS.search(query.strip()) or _SHORT_FOLLOWUP.match(stripped)):
         return query
 
     recent = history[-2:]
@@ -922,6 +929,130 @@ Standalone question:"""
 
     rewritten = llm_generate(prompt, num_predict=60, temperature=0.1).strip().strip('"')
     return rewritten if rewritten else query
+
+# ── Conversation memory ──────────────────────────────────────────────────
+# Small facts the user states about themselves in the chat ("my name is Seema",
+# "I only care about the bills", "call me Sam") are picked up with simple rules,
+# so the assistant can use them later in the same chat. Nothing is stored
+# anywhere else: they are re-read from the saved chat on every question.
+_USER_FACT = re.compile(
+    r"^\s*(?:please\s+)?(?:"
+    r"remember\b|note\s+that\b|keep\s+in\s+mind\b|from\s+now\s+on\b|call\s+me\b"
+    r"|my\s+\w+(?:\s+\w+)?\s+(?:is|are|was)\b"
+    r"|i(?:\s+am|'m)\s+called\b|i(?:\s+am|'m)\s+(?:a|an)\s+\w+"
+    r"|i\s+(?:work|study|live|teach|prefer|like|love|use)\b"
+    r"|i\s+(?:only\s+)?care\s+(?:about|for)\b|i\s+only\b|i(?:\s+am|'m)\s+focus\w*\b"
+    r")",
+    re.IGNORECASE)
+
+# Questions about the conversation itself ("what's my name?", "what did I ask?").
+_ABOUT_CONVERSATION = re.compile(
+    r"\bwhat(?:'s|\s+is)\s+my\s+name\b|\bwho\s+am\s+i\b"
+    r"|\bdo\s+you\s+(?:remember|know)\s+(?:my|me|what\s+i)\b"
+    r"|\bwhat\s+did\s+(?:i|we)\s+(?:say|ask|talk|discuss|mention)\b"
+    r"|\bwhat\s+(?:did\s+you|have\s+you)\s+(?:say|said|tell|told)\b"
+    r"|\bdid\s+i\s+(?:tell|mention|say|ask)\b"
+    r"|\bwhat\s+(?:have\s+)?we\s+(?:talked|discussed|covered)\b"
+    r"|\bwhat\s+was\s+my\s+(?:last|first|previous)\s+(?:question|message)\b"
+    r"|\bremind\s+me\s+what\b",
+    re.IGNORECASE)
+
+
+def _is_user_fact(text):
+    t = (text or "").strip()
+    return bool(t) and len(t) <= 200 and not t.endswith("?") and bool(_USER_FACT.match(t))
+
+
+def extract_notes(user_messages, max_notes=8):
+    """The facts the user stated about themselves, newest last (at most max_notes)."""
+    notes = []
+    for text in user_messages or []:
+        if _is_user_fact(text):
+            note = " ".join(str(text).split())[:150]
+            if note not in notes:
+                notes.append(note)
+    return notes[-max_notes:]
+
+
+def _trim_history(history, max_turns=6):
+    """Keep the last few exchanges, with long questions/answers cut short so the
+    prompts stay small (the Groq free tier has a small token limit)."""
+    trimmed = []
+    for turn in (history or [])[-max_turns:]:
+        item = dict(turn)
+        item["question"] = str(turn.get("question", ""))[:300]
+        item["answer"] = str(turn.get("answer", ""))[:600]
+        trimmed.append(item)
+    return trimmed
+
+
+def _chat_context(history, notes):
+    """The earlier conversation, as text for a prompt."""
+    parts = []
+    if notes:
+        parts.append("Things the user told you earlier in this conversation:\n- " + "\n- ".join(notes))
+    if history:
+        turns = "\n".join(f"User: {t['question']}\nAssistant: {t['answer'][:300]}" for t in history[-4:])
+        parts.append("Recent conversation:\n" + turns)
+    return "\n\n".join(parts)
+
+
+# ── Follow-ups ─────────────────────────────────────────────────────────────
+# "make it shorter", "in simple words", "as bullet points": change the FORM of the
+# previous answer. No new search is needed, only the previous answer is reworded.
+_REWORK = re.compile(
+    r"\b(shorter|shorten|briefer|brief(?:ly)?|simpler|simplify|simple\s+(?:words|terms|english|language)|"
+    r"in\s+(?:one|a)\s+(?:sentence|line|word)|bullet(?:s|\s+points?)?|in\s+points|rephrase|reword|rewrite|"
+    r"say\s+(?:that|it)\s+again|translate)\b", re.IGNORECASE)
+
+# "make it longer", "tell me more", "give an example": a fuller answer is wanted,
+# so the previous question is searched again, asking for more detail.
+_ELABORATE = re.compile(
+    r"\b(longer|more\s+detail(?:s|ed)?|in\s+detail|detailed|elaborate|expand|tell\s+me\s+more|"
+    r"explain\s+(?:it\s+)?more|more\s+about\s+(?:it|that|this)|go\s+on|continue|an?\s+example|for\s+example)\b",
+    re.IGNORECASE)
+
+_REFERENCE = re.compile(r"\b(it|its|that|this|these|those|them|answer|response|previous|above|last|again)\b", re.IGNORECASE)
+
+# One- or two-word follow-ups that need the last topic ("why?", "how so?").
+_SHORT_FOLLOWUP = re.compile(
+    r"^(why|why so|how|how so|how come|when|where|who|which|which one|what else|anything else|and then|really|so)$",
+    re.IGNORECASE)
+
+
+def _followup_kind(query, history):
+    """'REWORK' (change the form of the last answer), 'ELABORATE' (a fuller answer
+    to the last question) or None. Only short messages that point back at the
+    last answer count, so a normal new question is never mistaken for one."""
+    if not history:
+        return None
+    words = query.split()
+    if len(words) > 10:
+        return None
+    if not (len(words) <= 4 or _REFERENCE.search(query)):
+        return None
+    if _REWORK.search(query):
+        return "REWORK"
+    if len(words) <= 6 and _ELABORATE.search(query):
+        return "ELABORATE"
+    return None
+
+
+def rework_answer(query, last_turn):
+    """Re-write the previous answer the way the user asks (shorter, simpler, bullets...),
+    using only what the previous answer already says."""
+    prompt = f"""Here is the previous question and the answer you gave.
+
+Previous question: {last_turn['question']}
+Previous answer: {str(last_turn['answer'])[:3000]}
+
+The user now says: {query}
+
+Rewrite the previous answer the way the user asks. Use ONLY the facts in the previous answer - do not add anything new. Keep numbers, names and dates exactly as written.
+
+Rewritten answer:"""
+    return llm_generate(prompt, num_predict=300, temperature=0.1).strip()
+
 
 _SOURCE_STOPWORDS = {
     "which", "their", "there", "about", "would", "could", "should", "these", "those",
@@ -1046,7 +1177,7 @@ SEARCH_TOOL = [{
 }]
 
 
-def agent_search_loop(query, user_id, history, max_steps=4, scope=None):
+def agent_search_loop(query, user_id, history, max_steps=4, scope=None, notes=None, elaborate=False):
     """Agentic SEARCH: lets the model call search_documents more than once,
     e.g. once per document, so a question relevant to several documents
     doesn't lose one of them to a single top-k retrieval pass."""
@@ -1071,6 +1202,11 @@ Rules you must follow:
 9. Answer only if the search results directly state the thing asked about. Do not guess from related details: a phone number of the seller is not the buyer's, and a black telephone does not tell you the colour of a door. If the results are about a different person, company or thing than the one asked about, say you couldn't find it.
 10. If the user asks how many items or rows there are and that number is not written in the results, say it isn't stated - do not count them yourself.
 11. Write currency exactly as it appears in the results (for example Rs. or NPR); never change it to another symbol such as the rupee sign or a dollar sign."""
+    if elaborate:
+        system_prompt += "\n12. The user asked for a fuller answer than your previous one. Give a more detailed answer, in several sentences, using every relevant detail the searches return."
+    if notes:
+        system_prompt += ("\n\nThings the user told you earlier in this chat (about themselves - use them only if they help, "
+                          "and never as a source of facts about the documents):\n- " + "\n- ".join(notes))
 
     messages = [{"role": "system", "content": system_prompt}]
     for turn in (history or [])[-2:]:
@@ -1214,10 +1350,29 @@ def add_following_chunks(results, user_id, max_total=10):
     return combined if len(combined) <= max_total else list(results)
 
 
-def agent_query(query, user_id, source_file=None, history=None):
+def agent_query(query, user_id, source_file=None, history=None, user_messages=None):
     """Entry point for every question: decides what kind of request it is (list documents, summarise, table or key-value extraction, chat, or document search) and answers it."""
+    full_history = history or []
+    history = _trim_history(history)  # long answers cut short, so prompts stay small
+    notes = extract_notes((user_messages or []) + [query])  # facts the user stated earlier in this chat
     action = agent_decide_action(query)
     scope = _as_scope(source_file)  # files the user picked for this question (none = all documents)
+
+    # "make it shorter" / "make it longer" / "give an example" point back at the last answer.
+    followup = _followup_kind(query, history) if action in ("CHAT", "SEARCH") else None
+    elaborate = False
+    if followup == "REWORK":
+        last = full_history[-1]
+        return {
+            "answer": rework_answer(query, last),
+            "sources": last.get("sources") or [],
+            "source_refs": last.get("source_refs"),
+            "action_taken": "REWORK",
+        }
+    if followup == "ELABORATE":
+        earlier = [t["question"] for t in history if len(t["question"].split()) >= 3]
+        if earlier:
+            query, action, elaborate = earlier[-1], "SEARCH", True  # search the last real question again, in more detail
 
 
     # A follow-up like "explain that more simply" or "no, I mean RAG" has no
@@ -1230,7 +1385,7 @@ def agent_query(query, user_id, source_file=None, history=None):
     # Only rewrite for SEARCH — LIST/SUMMARY/CHAT should act on what the user
     # actually typed, since rewriting a short command like "what documents
     # do you have?" against unrelated prior topics can corrupt it.
-    if action == "SEARCH":
+    if action == "SEARCH" and not elaborate:
         query = rewrite_query(query, history)
 
 
@@ -1355,14 +1510,20 @@ def agent_query(query, user_id, source_file=None, history=None):
                 f"Do not make up abilities.\n\nQuestion: {query}",
                 num_predict=150)
         else:
-            # Ordinary small talk: just chat, without bringing up PDFs.
-            answer = llm_generate(f"Respond naturally and briefly to this message: {query}", num_predict=100)
+            # Ordinary small talk: just chat, without bringing up PDFs. The earlier
+            # conversation is included, so "what's my name?" can be answered.
+            context = _chat_context(history, notes)
+            answer = llm_generate(
+                "Respond naturally and briefly to the message below. Use the conversation notes only for what the user "
+                "told you or asked earlier (such as their name). Never invent facts about the user; if they ask about "
+                "something that was not said, say you don't remember it being mentioned.\n\n"
+                + (context + "\n\n" if context else "") + f"Message: {query}", num_predict=120)
         return {"answer": answer, "sources": [], "action_taken": "CHAT"}
 
     else:  # SEARCH
         if LLM_PROVIDER == "groq":
             try:
-                return agent_search_loop(query, user_id, history, scope=scope)
+                return agent_search_loop(query, user_id, history, scope=scope, notes=notes, elaborate=elaborate)
             except Exception as e:
                 print(f"Agent loop failed ({type(e).__name__}): {e}")
 
@@ -1396,7 +1557,7 @@ def agent_query(query, user_id, source_file=None, history=None):
                 "action_taken": "SEARCH_NO_MATCH"
             }
 
-        answer = generate_answer(query, results)
+        answer = generate_answer(query, results, elaborate=elaborate)
         sources = _sources_used(answer, [(src, text) for (_, src, text, _) in results])
         source_refs = _source_refs(answer, [(cid, src, text) for (cid, src, text, _) in results], sources)
         return {"answer": answer, "sources": sources, "source_refs": source_refs, "action_taken": "SEARCH"}
