@@ -108,7 +108,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
             placeholder="Email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full rounded-xl border border-[#DDD9D0] px-3 py-2 text-[14.5px] outline-none focus:border-[#2D6A6A]"
+            className="w-full rounded-xl border border-[#E6E0D2] px-3 py-2 text-[14.5px] outline-none focus:border-[#5E7C5C]"
           />
           <input
             type="password"
@@ -117,7 +117,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
             placeholder="Password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded-xl border border-[#DDD9D0] px-3 py-2 text-[14.5px] outline-none focus:border-[#2D6A6A]"
+            className="w-full rounded-xl border border-[#E6E0D2] px-3 py-2 text-[14.5px] outline-none focus:border-[#5E7C5C]"
           />
 
           {error && <p className="text-[13px] text-red-600">{error}</p>}
@@ -125,7 +125,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
           <button
             type="submit"
             disabled={loading}
-            className="w-full rounded-xl bg-[#2D6A6A] py-2 text-[14.5px] font-medium text-white transition hover:bg-[#255757] disabled:opacity-50"
+            className="w-full rounded-xl bg-[#5E7C5C] py-2 text-[14.5px] font-medium text-white transition hover:bg-[#4E684C] disabled:opacity-50"
           >
             {loading
               ? "Please wait…"
@@ -162,7 +162,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
                   setMode("signup");
                   setError("");
                 }}
-                className="font-medium text-[#2D6A6A] hover:underline"
+                className="font-medium text-[#5E7C5C] hover:underline"
               >
                 Sign up
               </button>
@@ -176,7 +176,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
                   setMode("login");
                   setError("");
                 }}
-                className="font-medium text-[#2D6A6A] hover:underline"
+                className="font-medium text-[#5E7C5C] hover:underline"
               >
                 Log in
               </button>
