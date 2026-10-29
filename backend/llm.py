@@ -32,7 +32,9 @@ def _call_groq(prompt, num_predict, temperature):
     kwargs = dict(
         model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=max(num_predict, 300),
+        # gpt-oss thinks before it writes, and the thinking counts against max_tokens,
+        # so leave room for it or the answer is cut off in the middle of a sentence.
+        max_tokens=max(num_predict, 300) + (700 if "gpt-oss" in GROQ_MODEL else 0),
         temperature=temperature,
     )
     if "gpt-oss" in GROQ_MODEL:
