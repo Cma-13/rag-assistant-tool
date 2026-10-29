@@ -383,6 +383,12 @@ def retrieve_chunks(query, user_id, top_k=5, source_file=None, candidate_k=20):
     best_ids = sorted(scores, key=scores.get, reverse=True)[:top_k]
     return [rows[i] for i in best_ids]
 
+_MORE_DETAIL = ("The user wants a fuller answer than before: give a more detailed answer in several sentences, "
+                "covering every relevant detail in the context.")
+_AN_EXAMPLE = ("The user wants an example: give one concrete example taken from the context (a specific fact, figure or case), "
+               "in two or three sentences.")
+
+
 def generate_answer(query, retrieved_chunks, elaborate=False):
     """Write the answer to a question using only the retrieved document passages."""
     # Group chunks by document (each document's chunks stay in original order)
@@ -396,8 +402,7 @@ def generate_answer(query, retrieved_chunks, elaborate=False):
         for doc, chunks in by_doc.items()
     )
 
-    more_detail = ("The user wants a fuller answer than before: give a more detailed answer in several sentences, "
-                   "covering every relevant detail in the context.\n\n") if elaborate else ""
+    more_detail = ((elaborate if isinstance(elaborate, str) else _MORE_DETAIL) + "\n\n") if elaborate else ""
 
     prompt = f"""You are a helpful assistant answering questions based only on the provided context.
 The context is split into labeled documents. Details from one document must never be mixed into facts from another.
@@ -580,7 +585,19 @@ def _documents_named_in_query(query, docs):
     return named
 
 
-def _pick_documents_for_query(query, user_id, source_file, max_docs=3):
+_TABLE_WORDS = set("""show me give list display extract get put make as a an the table tables key details detail values
+value numbers number all of in into rows row columns column from this that document file pdf please can you""".split())
+
+
+def _table_topic(query):
+    """The topic of a table request ('temperatures, CO2 levels, sea rise'), without the
+    words that only ask for a table. The search uses this, so the word 'table' does
+    not pull in documents that merely contain tables."""
+    words = [w for w in re.findall(r"[A-Za-z0-9]+", query) if w.lower() not in _TABLE_WORDS]
+    return " ".join(words) if len(words) >= 2 else query
+
+
+def _pick_documents_for_query(query, user_id, source_file, max_docs=3, recent_doc=None):
     """Work out which document(s) the user means: an explicit selection first,
     then filenames typed in the question, then the documents the search finds
     the most relevant chunks in. When the question could fit several documents
@@ -594,7 +611,7 @@ def _pick_documents_for_query(query, user_id, source_file, max_docs=3):
     if named:
         return named[:max_docs]
 
-    results = retrieve_chunks(query, user_id, top_k=8)
+    results = retrieve_chunks(_table_topic(query), user_id, top_k=8)
     if not results:
         return []
 
@@ -602,6 +619,8 @@ def _pick_documents_for_query(query, user_id, source_file, max_docs=3):
     counts = {}
     for row in results:
         counts[row[1]] = counts.get(row[1], 0) + 1
+    if recent_doc in counts and counts[recent_doc] >= max(counts.values()):
+        return [recent_doc]  # the document we are talking about wins ties
     ranked = sorted(order, key=lambda d: -counts[d])  # stable: ties keep search order
     # Keep documents with more than half as many matching chunks as the best one
     return [d for d in ranked if counts[d] > counts[ranked[0]] / 2][:max_docs]
@@ -807,7 +826,8 @@ def agent_decide_action(query):
         return "CHAT"
 
     # "my name is Seema" / "what's my name?" are about the conversation, not the documents
-    if _is_user_fact(query) or _ABOUT_CONVERSATION.search(query):
+    if (_is_user_fact(query) or _ABOUT_CONVERSATION.search(query)
+            or (_ABOUT_ME.search(query) and not _DOC_WORDS.search(query))):
         return "CHAT"
 
     list_keywords = ["what documents", "which documents", "what files", "which files",
@@ -939,7 +959,7 @@ _USER_FACT = re.compile(
     r"^\s*(?:please\s+)?(?:"
     r"remember\b|note\s+that\b|keep\s+in\s+mind\b|from\s+now\s+on\b|call\s+me\b"
     r"|my\s+\w+(?:\s+\w+)?\s+(?:is|are|was)\b"
-    r"|i(?:\s+am|'m)\s+called\b|i(?:\s+am|'m)\s+(?:a|an)\s+\w+"
+    r"|i(?:\s+am|'m)\s+called\b|i(?:\s+am|'m)\s+(?!(?:looking|trying|searching|asking|wondering|going|getting|having|unable|not|here|confused)\b)\w+"
     r"|i\s+(?:work|study|live|teach|prefer|like|love|use)\b"
     r"|i\s+(?:only\s+)?care\s+(?:about|for)\b|i\s+only\b|i(?:\s+am|'m)\s+focus\w*\b"
     r")",
@@ -947,7 +967,10 @@ _USER_FACT = re.compile(
 
 # Questions about the conversation itself ("what's my name?", "what did I ask?").
 _ABOUT_CONVERSATION = re.compile(
-    r"\bwhat(?:'s|\s+is)\s+my\s+name\b|\bwho\s+am\s+i\b"
+    r"\bwho\s+am\s+i\b|\bwho\s+i\s+am\b|\bwhat\s+do\s+you\s+know\s+about\s+me\b"
+    r"|\b(?:were|are|did|do)\s+you\s+(?:able\s+to\s+)?(?:answer|understand)\b"
+    r"|\bwhat\s+(?:are|were)\s+we\s+(?:talking|discussing|speaking)\s+about\b"
+    r"|\bwhich\s+(?:document|file|pdf)\s+(?:are|were)\s+we\b"
     r"|\bdo\s+you\s+(?:remember|know)\s+(?:my|me|what\s+i)\b"
     r"|\bwhat\s+did\s+(?:i|we)\s+(?:say|ask|talk|discuss|mention)\b"
     r"|\bwhat\s+(?:did\s+you|have\s+you)\s+(?:say|said|tell|told)\b"
@@ -956,6 +979,12 @@ _ABOUT_CONVERSATION = re.compile(
     r"|\bwhat\s+was\s+my\s+(?:last|first|previous)\s+(?:question|message)\b"
     r"|\bremind\s+me\s+what\b",
     re.IGNORECASE)
+
+
+# "my name", "about me": about the user, unless the question is about a document
+# ("what is my name on the marksheet?").
+_ABOUT_ME = re.compile(r"\bmy\s+name\b|\babout\s+me\b", re.IGNORECASE)
+_DOC_WORDS = re.compile(r"\b(document|doc|pdf|file|invoice|bill|marksheet|certificate|resume|cv|report|page)\b", re.IGNORECASE)
 
 
 def _is_user_fact(text):
@@ -994,7 +1023,28 @@ def _chat_context(history, notes):
     if history:
         turns = "\n".join(f"User: {t['question']}\nAssistant: {t['answer'][:300]}" for t in history[-4:])
         parts.append("Recent conversation:\n" + turns)
+        used = list(dict.fromkeys(src for t in history[-4:] for src in (t.get("sources") or [])))
+        if used:
+            parts.append("Documents used in the recent answers: " + ", ".join(used))
     return "\n\n".join(parts)
+
+
+def _recent_source_doc(history):
+    """The one document the recent answers came from, or None when it is unclear."""
+    for turn in reversed((history or [])[-4:]):
+        sources = list(dict.fromkeys(turn.get("sources") or []))
+        if sources:
+            return sources[0] if len(sources) == 1 else None
+    return None
+
+
+# "this document", "this one", "the file we are talking about" ...
+_DEICTIC = re.compile(
+    r"\b(?:this|that|the|current|same)\s+(?:\w+\s+)?(?:document|doc|file|pdf|one|story)\b"
+    r"|\bwe\s+(?:are|were)\s+(?:currently\s+)?(?:talking|discussing)\b|\bcurrently\b",
+    re.IGNORECASE)
+
+_ASK_WHICH = "Which document would you like summarized?"
 
 
 # ── Follow-ups ─────────────────────────────────────────────────────────────
@@ -1020,22 +1070,47 @@ _SHORT_FOLLOWUP = re.compile(
     re.IGNORECASE)
 
 
+# Words that can appear in a follow-up like "make it shorter" or "give me an example then".
+# If a message has any other word (a topic such as "RAG" or "the penalty clause"), it is a
+# new question and is never treated as a follow-up.
+_FOLLOWUP_VOCAB = set("""make it that this those these them its shorter shorten longer simpler simplify simple more detail
+details detailed in one a an the sentence line word words bullet bullets point points please can you could give me example
+for tell explain elaborate expand go on continue then now again rephrase reword rewrite translate into to nepali english hindi
+briefly brief short so also and just little bit i want need would like be use say put as with some another of your answer
+response previous above last what said about is was thing things pls plz kindly thanks thank okay ok yes yeah sure hmm well but now""".split())
+
+
 def _followup_kind(query, history):
     """'REWORK' (change the form of the last answer), 'ELABORATE' (a fuller answer
-    to the last question) or None. Only short messages that point back at the
-    last answer count, so a normal new question is never mistaken for one."""
+    to the last question) or None. Only short messages made of follow-up words
+    count, so a normal new question is never mistaken for one."""
     if not history:
         return None
-    words = query.split()
-    if len(words) > 10:
+    if len(query.split()) > 12:
         return None
-    if not (len(words) <= 4 or _REFERENCE.search(query)):
+    words = re.findall(r"[a-z']+", query.lower())
+    if not words or any(w not in _FOLLOWUP_VOCAB for w in words):
         return None
     if _REWORK.search(query):
         return "REWORK"
-    if len(words) <= 6 and _ELABORATE.search(query):
+    if _ELABORATE.search(query):
         return "ELABORATE"
     return None
+
+
+def _rework_instruction(query):
+    q = query.lower()
+    if re.search(r"\bone\s+(?:sentence|line|word)\b|\ba\s+(?:sentence|line|word)\b", q):
+        return "Write it as exactly one short sentence."
+    if re.search(r"\bshorter|\bshorten|\bbrief", q):
+        return "Make it clearly shorter: at most two sentences, keeping only the key facts."
+    if re.search(r"\bsimpl", q):
+        return "Use very simple words and short sentences, as if explaining to a child."
+    if re.search(r"\bbullet|\bin\s+points\b", q):
+        return "Write it as a short bullet list."
+    if "translate" in q:
+        return f"Translate it as asked ({query}). Keep numbers and names the same."
+    return f"Do what the user asks: {query}"
 
 
 def rework_answer(query, last_turn):
@@ -1047,8 +1122,9 @@ Previous question: {last_turn['question']}
 Previous answer: {str(last_turn['answer'])[:3000]}
 
 The user now says: {query}
+Instruction: {_rework_instruction(query)}
 
-Rewrite the previous answer the way the user asks. Use ONLY the facts in the previous answer - do not add anything new. Keep numbers, names and dates exactly as written.
+Rewrite the previous answer that way. Use ONLY the facts in the previous answer - do not add anything new. Keep numbers, names and dates exactly as written.
 
 Rewritten answer:"""
     return llm_generate(prompt, num_predict=300, temperature=0.1).strip()
@@ -1203,7 +1279,7 @@ Rules you must follow:
 10. If the user asks how many items or rows there are and that number is not written in the results, say it isn't stated - do not count them yourself.
 11. Write currency exactly as it appears in the results (for example Rs. or NPR); never change it to another symbol such as the rupee sign or a dollar sign."""
     if elaborate:
-        system_prompt += "\n12. The user asked for a fuller answer than your previous one. Give a more detailed answer, in several sentences, using every relevant detail the searches return."
+        system_prompt += "\n12. " + (elaborate if isinstance(elaborate, str) else _MORE_DETAIL)
     if notes:
         system_prompt += ("\n\nThings the user told you earlier in this chat (about themselves - use them only if they help, "
                           "and never as a source of facts about the documents):\n- " + "\n- ".join(notes))
@@ -1219,8 +1295,16 @@ Rules you must follow:
     all_hits = []    # (chunk id, document, text), used to find page numbers
     for step in range(max_steps):
         choice = "required" if step == 0 else ("none" if step == max_steps - 1 else "auto")
-        response = groq_chat(messages, tools=SEARCH_TOOL, tool_choice=choice)
-        msg = response.choices[0].message
+        try:
+            response = groq_chat(messages, tools=SEARCH_TOOL, tool_choice=choice)
+            msg = response.choices[0].message
+        except Exception as e:
+            # Groq sometimes answers in text instead of calling the forced tool and then
+            # returns an error. On the first step we simply do the search ourselves below.
+            if step == 0 and "tool_use_failed" in str(e):
+                msg = type("NoToolReply", (), {"content": "", "tool_calls": None})()
+            else:
+                raise
 
         # Groq doesn't always honor tool_choice="required" on the first turn.
         # If it skipped the tool on step 0, force one direct unscoped search
@@ -1282,7 +1366,7 @@ Rules you must follow:
     }
 
 
-def _resolve_summary_doc(query, user_id, source_file):
+def _resolve_summary_doc(query, user_id, source_file, history=None):
     """Which document does 'summarize the story' mean? An explicit selection,
     a filename typed in the question, the only document, or the document the
     search finds clearly best. Returns None when it is not clear."""
@@ -1295,6 +1379,10 @@ def _resolve_summary_doc(query, user_id, source_file):
     named = _documents_named_in_query(query, docs)
     if len(named) == 1:
         return named[0]
+    # "summarize this document" while talking about one document means that one
+    recent = _recent_source_doc(history)
+    if recent in docs and _DEICTIC.search(query):
+        return recent
     results = retrieve_chunks(query, user_id, top_k=8)
     if not results:
         return None
@@ -1358,6 +1446,16 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
     action = agent_decide_action(query)
     scope = _as_scope(source_file)  # files the user picked for this question (none = all documents)
 
+    # The reply to "Which document would you like summarized?": a document name, or "this one".
+    if (user_id is not None and history and str(history[-1].get("answer", "")).startswith(_ASK_WHICH)
+            and action in ("CHAT", "SEARCH")):
+        all_docs = list_documents(user_id)
+        named = _documents_named_in_query(query, all_docs)
+        recent = _recent_source_doc(history)
+        pick = named[0] if len(named) == 1 else (recent if recent in all_docs and _DEICTIC.search(query) else None)
+        if pick:
+            action, scope = "SUMMARY", [pick]
+
     # "make it shorter" / "make it longer" / "give an example" point back at the last answer.
     followup = _followup_kind(query, history) if action in ("CHAT", "SEARCH") else None
     elaborate = False
@@ -1370,9 +1468,19 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
             "action_taken": "REWORK",
         }
     if followup == "ELABORATE":
-        earlier = [t["question"] for t in history if len(t["question"].split()) >= 3]
+        # the last REAL question (not an earlier "make it shorter" or "why?")
+        earlier = [t["question"] for t in history
+                   if len(t["question"].split()) >= 3
+                   and _followup_kind(t["question"], [t]) is None
+                   and not _SHORT_FOLLOWUP.match(t["question"].strip().lower().strip("!.? "))]
         if earlier:
-            query, action, elaborate = earlier[-1], "SEARCH", True  # search the last real question again, in more detail
+            wants_example = bool(re.search(r"example", query, re.IGNORECASE))
+            # "an example" / "more detail" after a table makes no sense as another table, so the
+            # search uses the table's topic (without the word "table") and asks for sentences.
+            last_q = earlier[-1]
+            query = _table_topic(last_q) if _TABLE_REQUEST.search(last_q) else last_q
+            action = "SEARCH"  # search that question again
+            elaborate = (_AN_EXAMPLE if wants_example else _MORE_DETAIL) + " Answer in plain sentences, not a table."
 
 
     # A follow-up like "explain that more simply" or "no, I mean RAG" has no
@@ -1408,15 +1516,15 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
         return {"answer": generate_overview(user_id, only=scope), "sources": [], "action_taken": "OVERVIEW"}
 
     elif action == "SUMMARY":
-        target = _resolve_summary_doc(query, user_id, source_file)
+        target = _resolve_summary_doc(query, user_id, scope, history)
         if not target:
             docs = scope or list_documents(user_id)
-            answer = "Which document would you like summarized? You have: " + ", ".join(docs) if docs else "No documents have been uploaded yet."
+            answer = f"{_ASK_WHICH} You have: " + ", ".join(docs) if docs else "No documents have been uploaded yet."
             return {"answer": answer, "sources": [], "action_taken": "SUMMARY"}
         return {"answer": generate_summary(target, user_id), "sources": [target], "action_taken": "SUMMARY"}
 
     elif action == "TABLE":
-        docs = _pick_documents_for_query(query, user_id, source_file)
+        docs = _pick_documents_for_query(query, user_id, scope, recent_doc=_recent_source_doc(history))
         if not docs:
             return {
                 "answer": "I couldn't find a document with that information. Try naming the document, for example: \"show the table in invoice.pdf\".",
@@ -1424,7 +1532,9 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
                 "action_taken": "TABLE_NO_MATCH"
             }
 
-        explicit = bool(source_file) or bool(_documents_named_in_query(query, list_documents(user_id)))
+        recent = _recent_source_doc(history)
+        explicit = (bool(scope) or bool(_documents_named_in_query(query, list_documents(user_id)))
+                    or (recent is not None and docs == [recent]))  # the document we are talking about
 
         results = []
         sections = {}
@@ -1489,7 +1599,7 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
             short = [s for s in sections.get(first, []) if len(s) <= 30][:3]
             if short:
                 answer += " Try asking about: " + ", ".join(short) + "."
-            return {"answer": answer, "sources": [first], "action_taken": "TABLE_NOT_FOUND"}
+            return {"answer": answer, "sources": [], "action_taken": "TABLE_NOT_FOUND"}
         if len(shown) == 1:
             answer = _structured_to_text(shown[0])
         else:
@@ -1516,7 +1626,9 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
             answer = llm_generate(
                 "Respond naturally and briefly to the message below. Use the conversation notes only for what the user "
                 "told you or asked earlier (such as their name). Never invent facts about the user; if they ask about "
-                "something that was not said, say you don't remember it being mentioned.\n\n"
+                "something that was not said, say you don't remember it being mentioned. You cannot see the user's "
+                "documents in this reply, so never describe what a document says: if they want something from a "
+                "document, ask them to put it as a question.\n\n"
                 + (context + "\n\n" if context else "") + f"Message: {query}", num_predict=120)
         return {"answer": answer, "sources": [], "action_taken": "CHAT"}
 
