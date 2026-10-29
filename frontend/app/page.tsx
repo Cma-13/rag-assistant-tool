@@ -586,16 +586,31 @@ export default function Home() {
 
       // Build recent history from the last few exchanges (question/answer pairs)
       // so the backend can resolve follow-ups like "that" or "the second one".
-      const recentHistory: { question: string; answer: string }[] = [];
+      // The sources go along too, so "make it shorter" can keep the same sources.
+      const recentHistory: {
+        question: string;
+        answer: string;
+        sources: string[];
+        source_refs: { file: string; pages: number[] }[];
+      }[] = [];
       for (let i = 0; i < past.length - 1; i++) {
         if (past[i].role === "user" && past[i + 1]?.role === "assistant") {
           recentHistory.push({
             question: past[i].content,
             answer: past[i + 1].content,
+            sources: past[i + 1].sources ?? [],
+            source_refs: past[i + 1].sourceRefs ?? [],
           });
         }
       }
-      const lastFewTurns = recentHistory.slice(-4);
+      const lastFewTurns = recentHistory.slice(-6);
+
+      // Everything the user typed in this chat, so small details they stated
+      // earlier ("my name is ...") can be remembered.
+      const chatUserMessages = past
+        .filter((m) => m.role === "user")
+        .map((m) => m.content.slice(0, 200))
+        .slice(-60);
 
       const res = await fetch("http://127.0.0.1:8000/query", {
         method: "POST",
@@ -603,6 +618,7 @@ export default function Home() {
         body: JSON.stringify({
           question,
           history: lastFewTurns,
+          chat_user_messages: chatUserMessages,
           ...(scope && scope.length ? { source_files: scope } : {}),
         }),
       });
