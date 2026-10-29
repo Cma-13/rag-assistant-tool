@@ -151,13 +151,13 @@ function TableView({ table }: { table: StructuredTable }) {
         <div className="flex flex-shrink-0 items-center gap-1.5">
           <button
             onClick={handleCopy}
-            className="rounded-md border border-[#DDD9D0] bg-white px-2 py-0.5 text-[11px] font-medium text-[#6B6B6B] transition hover:border-[#C4DFE0] hover:bg-[#EAF3F3] hover:text-[#2D6A6A]"
+            className="rounded-md border border-[#E6E0D2] bg-white px-2 py-0.5 text-[11px] font-medium text-[#6B6B6B] transition hover:border-[#B8CFB3] hover:bg-[#EEF4EC] hover:text-[#5E7C5C]"
           >
             {copied ? "Copied" : "Copy"}
           </button>
           <button
             onClick={handleDownload}
-            className="rounded-md border border-[#DDD9D0] bg-white px-2 py-0.5 text-[11px] font-medium text-[#6B6B6B] transition hover:border-[#C4DFE0] hover:bg-[#EAF3F3] hover:text-[#2D6A6A]"
+            className="rounded-md border border-[#E6E0D2] bg-white px-2 py-0.5 text-[11px] font-medium text-[#6B6B6B] transition hover:border-[#B8CFB3] hover:bg-[#EEF4EC] hover:text-[#5E7C5C]"
           >
             CSV
           </button>
@@ -166,12 +166,12 @@ function TableView({ table }: { table: StructuredTable }) {
 
       <div className="max-h-[420px] overflow-auto rounded-lg border border-[#E0DBD3]">
         <table className="w-auto min-w-[55%] table-auto border-collapse text-[12.5px]">
-          <thead className="sticky top-0 bg-[#EAF3F3] text-[#2D6A6A]">
+          <thead className="sticky top-0 bg-[#EEF4EC] text-[#5E7C5C]">
             <tr>
               {table.columns.map((col, c) => (
                 <th
                   key={c}
-                  className={`border-b border-[#C4DFE0] px-3 py-2 align-bottom text-[11.5px] font-semibold leading-tight ${
+                  className={`border-b border-[#B8CFB3] px-3 py-2 align-bottom text-[11.5px] font-semibold leading-tight ${
                     numericCols[c] ? "text-right" : "text-left"
                   }`}
                 >
@@ -224,7 +224,7 @@ function PairsView({ pairs }: { pairs: { key: string; value: string }[] }) {
         <tbody>
           {pairs.map((p, i) => (
             <tr key={i} className={i % 2 === 1 ? "bg-[#FAF8F5]" : "bg-white"}>
-              <th className="w-[38%] border-b border-[#EFEBE4] bg-[#F5F9F9] px-3 py-1.5 text-left align-top text-[12px] font-semibold text-[#2D6A6A]">
+              <th className="w-[38%] border-b border-[#EFEBE4] bg-[#F6FAF4] px-3 py-1.5 text-left align-top text-[12px] font-semibold text-[#5E7C5C]">
                 {p.key}
               </th>
               <td className="border-b border-[#EFEBE4] px-3 py-1.5 align-top">
@@ -245,7 +245,7 @@ function StructuredView({ structured }: { structured: Structured }) {
       {structured.results.map((result, i) => (
         <div key={i} className="space-y-3">
           {showDocNames && (
-            <div className="flex items-center gap-1.5 text-[12px] font-medium text-[#2D6A6A]">
+            <div className="flex items-center gap-1.5 text-[12px] font-medium text-[#5E7C5C]">
               <FileIcon /> {result.document}
             </div>
           )}
@@ -396,6 +396,27 @@ export default function Home() {
   const [deletingDoc, setDeletingDoc] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<File[]>([]);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
+
+  // Pop-ups (My documents, account menu) close when you click anywhere else or press Esc.
+  useEffect(() => {
+    const closePopups = () => {
+      setShowDocs(false);
+      setShowUserMenu(false);
+      setConfirmDelete(null);
+    };
+    const onClick = (e: MouseEvent) => {
+      if (!(e.target as Element | null)?.closest?.("[data-popup]")) closePopups();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closePopups();
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -840,7 +861,7 @@ export default function Home() {
 
   return (
     <div
-      className="flex h-screen flex-col bg-[#F0EDE8]"
+      className="flex h-screen flex-col bg-[#FEFAF3]"
       onDragOver={(e) => {
         e.preventDefault();
         setIsDragging(true);
@@ -850,8 +871,8 @@ export default function Home() {
     >
       {/* Drag-and-drop overlay */}
       {isDragging && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#2D6A6A]/10 backdrop-blur-sm">
-          <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-[#2D6A6A] bg-white/80 px-12 py-10 text-[#2D6A6A]">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#5E7C5C]/10 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-[#5E7C5C] bg-white/80 px-12 py-10 text-[#5E7C5C]">
             <UploadIcon />
             <p className="text-base font-semibold">Drop your PDF here</p>
           </div>
@@ -859,19 +880,16 @@ export default function Home() {
       )}
 
       {/* ── Top bar ───────────────────────────────── */}
-      <header className="flex items-center justify-between gap-4 border-b border-[#DDD9D0] bg-[#F0EDE8] px-6 py-3.5">
+      <header className="flex items-center justify-between gap-4 border-b border-[#E6E0D2] bg-[#FEFAF3] px-6 py-3.5">
         {/* Brand */}
         <div className="flex items-center gap-2.5 min-w-0">
-          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-[#2D6A6A] text-white shadow-sm">
+          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-[#5E7C5C] text-white shadow-sm">
             <BotIcon />
           </div>
           <div className="min-w-0">
             <h1 className="text-sm font-semibold text-[#1C1C1E] leading-tight">
               DocQuery
             </h1>
-            <p className="text-[11px] text-[#9A968C] leading-tight">
-              RAG Assistant
-            </p>
           </div>
         </div>
 
@@ -880,18 +898,19 @@ export default function Home() {
 
         {/* My documents */}
         {token && (
-          <div className="relative flex-shrink-0">
+          <div className="relative flex-shrink-0" data-popup>
             <button
               onClick={() => {
                 setShowDocs((prev) => !prev);
+                setShowUserMenu(false);
                 setConfirmDelete(null);
               }}
-              className="flex items-center gap-1.5 rounded-full border border-[#DDD9D0] bg-white px-3.5 py-1.5 text-xs font-medium text-[#6B6B6B] shadow-sm transition hover:border-[#C4DFE0] hover:bg-[#EAF3F3] hover:text-[#2D6A6A]"
+              className="flex items-center gap-1.5 rounded-full border border-[#E6E0D2] bg-white px-3.5 py-1.5 text-xs font-medium text-[#6B6B6B] shadow-sm transition hover:border-[#B8CFB3] hover:bg-[#EEF4EC] hover:text-[#5E7C5C]"
             >
               <FileIcon /> My documents ({uploadedDocs.length})
             </button>
             {showDocs && (
-              <div className="absolute right-0 top-10 z-20 w-72 rounded-xl border border-[#DDD9D0] bg-white py-2 shadow-lg">
+              <div className="absolute right-0 top-10 z-20 w-72 rounded-xl border border-[#E6E0D2] bg-white py-2 shadow-lg">
                 {uploadedDocs.length === 0 ? (
                   <p className="px-3 py-2 text-[12.5px] text-[#9A968C]">
                     No documents yet. Upload a PDF to get started.
@@ -901,14 +920,14 @@ export default function Home() {
                     {uploadedDocs.map((doc) => (
                       <li
                         key={doc}
-                        className="flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-[#F5F3EF]"
+                        className="flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-[#FBF0F3]"
                       >
                         <button
                           onClick={() => openDocument(doc)}
                           title={`Open ${doc}`}
-                          className="flex min-w-0 items-center gap-1.5 text-left text-[12.5px] text-[#1C1C1E] hover:text-[#2D6A6A] hover:underline"
+                          className="flex min-w-0 items-center gap-1.5 text-left text-[12.5px] text-[#1C1C1E] hover:text-[#5E7C5C] hover:underline"
                         >
-                          <span className="flex-shrink-0 text-[#2D6A6A]">
+                          <span className="flex-shrink-0 text-[#5E7C5C]">
                             <FileIcon />
                           </span>
                           <span className="truncate">{doc}</span>
@@ -926,7 +945,7 @@ export default function Home() {
                             <button
                               onClick={() => setConfirmDelete(null)}
                               disabled={deletingDoc === doc}
-                              className="rounded-md border border-[#DDD9D0] px-2 py-0.5 text-[11px] text-[#6B6B6B] hover:bg-white"
+                              className="rounded-md border border-[#E6E0D2] px-2 py-0.5 text-[11px] text-[#6B6B6B] hover:bg-white"
                             >
                               Cancel
                             </button>
@@ -951,16 +970,20 @@ export default function Home() {
         )}
 
         {userEmail ? (
-          <div className="relative flex-shrink-0">
+          <div className="relative flex-shrink-0" data-popup>
             <button
-              onClick={() => setShowUserMenu((prev) => !prev)}
-              className="flex h-8 w-8 items-center justify-center rounded-full bg-[#2D6A6A] text-[13px] font-semibold text-white shadow-sm"
+              onClick={() => {
+                setShowUserMenu((prev) => !prev);
+                setShowDocs(false);
+                setConfirmDelete(null);
+              }}
+              className="flex h-8 w-8 items-center justify-center rounded-full bg-[#5E7C5C] text-[13px] font-semibold text-white shadow-sm"
               title={userEmail}
             >
               {userInitial}
             </button>
             {showUserMenu && (
-              <div className="absolute right-0 top-10 z-10 w-48 rounded-xl border border-[#DDD9D0] bg-white py-2 shadow-lg">
+              <div className="absolute right-0 top-10 z-10 w-48 rounded-xl border border-[#E6E0D2] bg-white py-2 shadow-lg">
                 <p className="truncate px-3 pb-2 text-[12px] text-[#9A968C]">
                   {userEmail}
                 </p>
@@ -969,7 +992,7 @@ export default function Home() {
                     setShowUserMenu(false);
                     handleClearChat();
                   }}
-                  className="w-full px-3 py-1.5 text-left text-[13px] text-[#1C1C1E] hover:bg-[#F5F3EF]"
+                  className="w-full px-3 py-1.5 text-left text-[13px] text-[#1C1C1E] hover:bg-[#FBF0F3]"
                 >
                   Clear chat
                 </button>
@@ -978,7 +1001,7 @@ export default function Home() {
                     setShowUserMenu(false);
                     handleLogout();
                   }}
-                  className="w-full px-3 py-1.5 text-left text-[13px] text-[#1C1C1E] hover:bg-[#F5F3EF]"
+                  className="w-full px-3 py-1.5 text-left text-[13px] text-[#1C1C1E] hover:bg-[#FBF0F3]"
                 >
                   Log out
                 </button>
@@ -992,7 +1015,7 @@ export default function Home() {
                 setAuthMode("login");
                 setShowAuthModal(true);
               }}
-              className="rounded-xl border border-[#DDD9D0] px-3 py-1.5 text-[13px] font-medium text-[#1C1C1E] hover:bg-[#F5F3EF]"
+              className="rounded-xl border border-[#E6E0D2] px-3 py-1.5 text-[13px] font-medium text-[#1C1C1E] hover:bg-[#FBF0F3]"
             >
               Log in
             </button>
@@ -1001,7 +1024,7 @@ export default function Home() {
                 setAuthMode("signup");
                 setShowAuthModal(true);
               }}
-              className="rounded-xl bg-[#2D6A6A] px-3 py-1.5 text-[13px] font-medium text-white hover:bg-[#255757]"
+              className="rounded-xl bg-[#5E7C5C] px-3 py-1.5 text-[13px] font-medium text-white hover:bg-[#4E684C]"
             >
               Sign up
             </button>
@@ -1016,7 +1039,7 @@ export default function Home() {
             {/* Empty state */}
             {isEmpty && (
               <div className="flex flex-col items-center justify-center py-20 text-center">
-                <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-[#DDD9D0] bg-white text-[#2D6A6A] shadow-sm">
+                <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-[#EFD3DC] bg-[#F6E2E9] text-[#5E7C5C] shadow-sm">
                   <BotIcon />
                 </div>
                 <h2 className="mb-1.5 text-base font-semibold text-[#1C1C1E]">
@@ -1029,7 +1052,7 @@ export default function Home() {
                   {["Context-aware answers", "PDF documents"].map((feat) => (
                     <span
                       key={feat}
-                      className="rounded-full border border-[#DDD9D0] bg-white px-3 py-1 text-xs text-[#6B6B6B]"
+                      className="rounded-full border border-[#EFD3DC] bg-[#FBEFF3] px-3 py-1 text-xs text-[#8A4F66]"
                     >
                       {feat}
                     </span>
@@ -1046,7 +1069,7 @@ export default function Home() {
               >
                 {/* Bot avatar */}
                 {msg.role === "assistant" && (
-                  <div className="mb-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-[#2D6A6A] text-white shadow-sm">
+                  <div className="mb-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-[#5E7C5C] text-white shadow-sm">
                     <BotIcon />
                   </div>
                 )}
@@ -1058,7 +1081,7 @@ export default function Home() {
                         key={name}
                         onClick={() => openDocument(name)}
                         title={`Open ${name}`}
-                        className="flex max-w-full items-center gap-2.5 rounded-xl border border-[#E0DBD3] bg-white px-3 py-2 text-left shadow-sm transition hover:border-[#2D6A6A]"
+                        className="flex max-w-full items-center gap-2.5 rounded-xl border border-[#E0DBD3] bg-white px-3 py-2 text-left shadow-sm transition hover:border-[#5E7C5C]"
                       >
                         <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-red-50 text-[10px] font-bold text-red-600">
                           PDF
@@ -1071,7 +1094,7 @@ export default function Home() {
                         </span>
                       </button>
                     ))}
-                    <div className="max-w-full rounded-2xl rounded-br-sm bg-[#2D6A6A] px-4 py-3 text-[14.5px] leading-relaxed text-white shadow-sm">
+                    <div className="max-w-full rounded-2xl rounded-br-sm bg-[#5E7C5C] px-4 py-3 text-[14.5px] leading-relaxed text-white shadow-sm">
                       {renderContent(msg.content)}
                     </div>
                   </div>
@@ -1083,7 +1106,7 @@ export default function Home() {
                       : "max-w-[80%]"
                   } rounded-2xl px-4 py-3 text-[14.5px] leading-relaxed shadow-sm ${
                     msg.role === "user"
-                      ? "rounded-br-sm bg-[#2D6A6A] text-white"
+                      ? "rounded-br-sm bg-[#5E7C5C] text-white"
                       : "rounded-bl-sm border border-[#E0DBD3] bg-white text-[#1C1C1E]"
                   }`}
                 >
@@ -1108,14 +1131,14 @@ export default function Home() {
                             key={src}
                             onClick={() => openDocument(src, pages[0])}
                             title={`Open ${src}${pages.length ? ` at page ${pages[0]}` : ""}`}
-                            className="flex max-w-[260px] items-center gap-1 rounded-full border border-[#C4DFE0] bg-[#EAF3F3] px-2 py-0.5 text-[11px] font-medium text-[#2D6A6A] transition hover:border-[#2D6A6A] hover:bg-[#DCEDED]"
+                            className="flex max-w-[260px] items-center gap-1 rounded-full border border-[#B8CFB3] bg-[#EEF4EC] px-2 py-0.5 text-[11px] font-medium text-[#5E7C5C] transition hover:border-[#5E7C5C] hover:bg-[#DDEAD9]"
                           >
                             <span className="flex-shrink-0">
                               <FileIcon />
                             </span>
                             <span className="truncate">{src}</span>
                             {pageText && (
-                              <span className="flex-shrink-0 text-[#4A8A8A]">{pageText}</span>
+                              <span className="flex-shrink-0 text-[#84A282]">{pageText}</span>
                             )}
                           </button>
                         );
@@ -1127,7 +1150,7 @@ export default function Home() {
 
                 {/* User avatar */}
                 {msg.role === "user" && (
-                  <div className="mb-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-[#D8D3C9] text-[#6B6B6B] text-[11px] font-bold">
+                  <div className="mb-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-[#F6E2E9] text-[#8A4F66] text-[11px] font-bold">
                     {userInitial}
                   </div>
                 )}
@@ -1137,7 +1160,7 @@ export default function Home() {
             {/* Typing indicator */}
             {loading && (
               <div className="msg-enter flex items-end gap-2.5 justify-start">
-                <div className="mb-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-[#2D6A6A] text-white shadow-sm">
+                <div className="mb-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-[#5E7C5C] text-white shadow-sm">
                   <BotIcon />
                 </div>
                 <div className="rounded-2xl rounded-bl-sm border border-[#E0DBD3] bg-white px-4 py-3 shadow-sm">
@@ -1158,13 +1181,13 @@ export default function Home() {
         </div>
 
         {/* ── Input bar ─────────────────────────────── */}
-        <div className="border-t border-[#DDD9D0] bg-[#F0EDE8] px-4 py-4 md:px-8">
+        <div className="border-t border-[#E6E0D2] bg-[#FEFAF3] px-4 py-4 md:px-8">
           <div className="mx-auto max-w-3xl">
             <div
               className={`rounded-2xl border bg-white px-4 py-2 shadow-sm transition-all duration-150 ${
                 uploadedDocs.length > 0 || attachments.length > 0
-                  ? "border-[#DDD9D0] focus-within:border-[#2D6A6A] focus-within:shadow-[0_0_0_3px_rgba(45,106,106,0.10)]"
-                  : "border-[#DDD9D0] opacity-60"
+                  ? "border-[#E6E0D2] focus-within:border-[#5E7C5C] focus-within:shadow-[0_0_0_3px_rgba(45,106,106,0.10)]"
+                  : "border-[#E6E0D2] opacity-60"
               }`}
             >
               {/* PDFs attached to the next question */}
@@ -1204,7 +1227,7 @@ export default function Home() {
                 className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl text-[#6B6B6B] transition ${
                   loading || attachments.length >= MAX_ATTACHMENTS
                     ? "cursor-not-allowed opacity-40"
-                    : "cursor-pointer hover:bg-[#EAF3F3] hover:text-[#2D6A6A]"
+                    : "cursor-pointer hover:bg-[#EEF4EC] hover:text-[#5E7C5C]"
                 }`}
               >
                 <input
@@ -1235,8 +1258,8 @@ export default function Home() {
                     : attachments.length > 0
                       ? "Ask something about the attached file, or just send to add it…"
                       : uploadedDocs.length > 0
-                        ? "Ask anything about your knowledge base…"
-                        : "Say hi, or attach a PDF with + to ask about it…"
+                        ? "Type your question…"
+                        : "Type a message, or attach a PDF with +"
                 }
                 className="flex-1 bg-transparent py-1.5 text-[14.5px] text-[#1C1C1E] placeholder-[#B0ABA2] outline-none disabled:cursor-not-allowed"
               />
@@ -1244,7 +1267,7 @@ export default function Home() {
                 onClick={handleSend}
                 disabled={loading || (!input.trim() && attachments.length === 0)}
                 aria-label="Send message"
-                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl bg-[#2D6A6A] text-white shadow-sm transition hover:bg-[#255757] active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
+                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl bg-[#5E7C5C] text-white shadow-sm transition hover:bg-[#4E684C] active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 <SendIcon />
               </button>
