@@ -245,12 +245,14 @@ class QueryRequest(BaseModel):
     source_file: str | None = None  # optional — omit to search the whole knowledge base
     source_files: list[str] | None = None  # optional — limit the question to these documents (e.g. files just attached)
     history: list[dict] | None = None  # recent [{"question":..., "answer":...}, ...] for follow-ups
+    chat_user_messages: list[str] | None = None  # everything the user typed in this chat, so small details they stated can be remembered
 
 @app.post("/query")
 def query_documents(request: QueryRequest, current_user: dict | None = Depends(get_optional_user)):
     user_id = current_user["user_id"] if current_user else None
     scope = request.source_files or request.source_file
-    result = agent_query(request.question, user_id, source_file=scope, history=request.history)
+    result = agent_query(request.question, user_id, source_file=scope, history=request.history,
+                         user_messages=request.chat_user_messages)
     return {
         "question": request.question,
         "answer": result["answer"],
