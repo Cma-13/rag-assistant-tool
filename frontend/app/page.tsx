@@ -73,7 +73,7 @@ function splitCells(line: string): string[] {
     .replace(/^\|/, "")
     .replace(/\|$/, "")
     .split("|")
-    .map((c) => c.trim());
+    .map((c) => c.replace(/\*\*/g, "").trim()); // the model often bolds cells with **
 }
 
 function parseBlocks(text: string): Block[] {
@@ -804,6 +804,27 @@ export default function Home() {
           <span key={i}>{part}</span>
         ),
       );
+  // Lines that start with "* ", "- " or "• " are shown as normal bullets
+  // (a real • with a neat hanging indent) instead of the raw characters.
+  const renderLines = (text: string) =>
+    text.split("\n").map((line, i) => {
+      const bullet = line.match(/^(\s*)[*\-•]\s+(.*)$/);
+      if (bullet) {
+        const level = Math.min(Math.floor(bullet[1].length / 2), 3);
+        return (
+          <div key={i} className="flex gap-2" style={{ paddingLeft: `${0.5 + level * 1.25}rem` }}>
+            <span aria-hidden="true">•</span>
+            <span className="whitespace-pre-wrap">{renderBold(bullet[2])}</span>
+          </div>
+        );
+      }
+      if (line.trim() === "") return <div key={i} className="h-2" />;
+      return (
+        <div key={i} className="whitespace-pre-wrap">
+          {renderBold(line)}
+        </div>
+      );
+    });
   const renderContent = (text: string) =>
     parseBlocks(text).map((block, i) =>
       block.kind === "table" ? (
@@ -811,9 +832,7 @@ export default function Home() {
           <TableView table={block.table} />
         </div>
       ) : (
-        <span key={i} className="whitespace-pre-wrap">
-          {renderBold(block.text)}
-        </span>
+        <div key={i}>{renderLines(block.text)}</div>
       ),
     );
   const userInitial = userEmail ? userEmail[0].toUpperCase() : "U";
