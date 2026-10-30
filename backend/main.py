@@ -2,6 +2,10 @@ import shutil
 import os
 import json
 import hashlib
+import threading
+import time
+import uuid
+import traceback
 from psycopg2.extras import Json
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse
@@ -184,11 +188,74 @@ def get_optional_user(authorization: str = Header(None)):
 
     return {"user_id": payload["user_id"], "email": payload["email"]}
 
+# ── Background reading of uploaded PDFs ───────────────────────────────────
+# /upload only saves the file and answers straight away. The slow part (reading
+# the text, OCR, embedding) runs in a background thread, so the server stays
+# responsive and the browser never waits on a big PDF. The jobs are kept in
+# memory: if the server restarts while a file is still being read, that job is
+# lost and the file simply has to be uploaded again.
+UPLOAD_JOBS = {}              # job_id -> {user_id, filename, hash, status, chunks, error, created}
+JOBS_LOCK = threading.Lock()  # protects UPLOAD_JOBS
+READ_SLOT = threading.Semaphore(1)  # only one PDF is read at a time; the others wait their turn
+JOB_KEEP_SECONDS = 3600       # finished jobs are forgotten after an hour
+
+
+class UploadReadError(Exception):
+    """A problem with the PDF itself that the user can understand (shown as it is)."""
+
+
+def _job_view(job_id, job):
+    return {"job_id": job_id, "filename": job["filename"], "status": job["status"],
+            "chunks": job["chunks"], "error": job["error"]}
+
+
+def _forget_old_jobs():
+    now = time.time()
+    with JOBS_LOCK:
+        for job_id in [j for j, v in UPLOAD_JOBS.items()
+                       if v["status"] != "reading" and now - v["created"] > JOB_KEEP_SECONDS]:
+            del UPLOAD_JOBS[job_id]
+
+
+def _read_pdf_in_background(job_id, saved_path, storage_filename, content_hash, user_id):
+    """Runs in its own thread: read the PDF, split it, embed it and store it."""
+    try:
+        with READ_SLOT:
+            text = ocr_pdf(saved_path)
+            chunk_pairs = chunk_text_with_pages(text)
+            if not chunk_pairs:
+                raise UploadReadError("No readable text was found in this PDF.")
+            chunks = [c for c, _ in chunk_pairs]
+            pages = [pg for _, pg in chunk_pairs]
+            embeddings = embed_chunks(chunks)
+            store_chunks(storage_filename, chunks, embeddings, content_hash, user_id, pages=pages)
+        with JOBS_LOCK:
+            UPLOAD_JOBS[job_id].update(status="done", chunks=len(chunks))
+    except Exception as e:
+        print(f"UPLOAD: reading '{storage_filename}' failed ({type(e).__name__}): {e}")
+        traceback.print_exc()
+        # don't keep a file that never made it into the knowledge base
+        if os.path.exists(saved_path):
+            os.remove(saved_path)
+        message = str(e) if isinstance(e, UploadReadError) else "This PDF could not be read."
+        with JOBS_LOCK:
+            UPLOAD_JOBS[job_id].update(status="failed", error=message)
+
+
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     user_id = current_user["user_id"]
     content = await file.read()
     content_hash = hashlib.sha256(content).hexdigest()
+    _forget_old_jobs()
+
+    # 0. The same file is already being read for this user -> just follow that job
+    with JOBS_LOCK:
+        for job_id, job in UPLOAD_JOBS.items():
+            if job["user_id"] == user_id and job["hash"] == content_hash and job["status"] == "reading":
+                return {"status": "reading", "job_id": job_id, "filename": job["filename"]}
+        reserved = {job["filename"] for job in UPLOAD_JOBS.values()
+                    if job["user_id"] == user_id and job["status"] == "reading"}
 
     conn = get_connection()
     cur = conn.cursor()
@@ -210,6 +277,7 @@ async def upload_document(file: UploadFile = File(...), current_user: dict = Dep
         cur.close()
         conn.close()
         return {
+            "status": "done",
             "filename": stored_name,
             "chunks_stored": 0,
             "message": "This document (or an identical copy) is already in your knowledge base."
@@ -219,25 +287,63 @@ async def upload_document(file: UploadFile = File(...), current_user: dict = Dep
     cur.close()
     conn.close()
 
+    # a name another file of this user is about to take (it is still being read)
+    if storage_filename in reserved:
+        name, ext = os.path.splitext(file.filename)
+        counter = 1
+        while storage_filename in reserved or _name_is_taken(storage_filename, user_id):
+            storage_filename = f"{name}({counter}){ext}"
+            counter += 1
+
     saved_path = pdf_path(user_id, content_hash)
     os.makedirs(os.path.dirname(saved_path), exist_ok=True)
     with open(saved_path, "wb") as buffer:
         buffer.write(content)
 
-    try:
-        text = ocr_pdf(saved_path)
-        chunk_pairs = chunk_text_with_pages(text)
-        chunks = [c for c, _ in chunk_pairs]
-        pages = [pg for _, pg in chunk_pairs]
-        embeddings = embed_chunks(chunks)
-        store_chunks(storage_filename, chunks, embeddings, content_hash, user_id, pages=pages)
-    except Exception:
-        # don't keep a file that never made it into the knowledge base
-        if os.path.exists(saved_path):
-            os.remove(saved_path)
-        raise
+    job_id = uuid.uuid4().hex
+    with JOBS_LOCK:
+        UPLOAD_JOBS[job_id] = {"user_id": user_id, "filename": storage_filename, "hash": content_hash,
+                               "status": "reading", "chunks": 0, "error": None, "created": time.time()}
+    threading.Thread(
+        target=_read_pdf_in_background,
+        args=(job_id, saved_path, storage_filename, content_hash, user_id),
+        daemon=True,
+    ).start()
 
-    return {"filename": storage_filename, "chunks_stored": len(chunks)}
+    return {"status": "reading", "job_id": job_id, "filename": storage_filename}
+
+
+def _name_is_taken(filename, user_id):
+    """True if this user already has a stored document with this exact name."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM document_chunks WHERE source_file = %s AND user_id = %s LIMIT 1;", (filename, user_id))
+    taken = cur.fetchone() is not None
+    cur.close()
+    conn.close()
+    return taken
+
+
+@app.get("/upload/status")
+def upload_status(ids: str | None = None, current_user: dict = Depends(get_current_user)):
+    """How the background reading is going. With ids (comma separated job ids): those jobs.
+    Without ids: all of this user's files that are still being read."""
+    user_id = current_user["user_id"]
+    wanted = [i for i in (ids or "").split(",") if i]
+    with JOBS_LOCK:
+        if wanted:
+            jobs = {}
+            for job_id in wanted:
+                job = UPLOAD_JOBS.get(job_id)
+                if job and job["user_id"] == user_id:
+                    jobs[job_id] = _job_view(job_id, job)
+                else:
+                    # unknown: the server was restarted, or the job is too old
+                    jobs[job_id] = {"job_id": job_id, "status": "unknown", "filename": None,
+                                    "chunks": 0, "error": "This upload was interrupted. Please upload the PDF again."}
+            return {"jobs": jobs}
+        return {"jobs": {j: _job_view(j, v) for j, v in UPLOAD_JOBS.items()
+                         if v["user_id"] == user_id and v["status"] == "reading"}}
 
 
 class QueryRequest(BaseModel):
@@ -245,6 +351,7 @@ class QueryRequest(BaseModel):
     source_file: str | None = None  # optional — omit to search the whole knowledge base
     source_files: list[str] | None = None  # optional — limit the question to these documents (e.g. files just attached)
     history: list[dict] | None = None  # recent [{"question":..., "answer":...}, ...] for follow-ups
+    recent_uploads: list[str] | None = None  # the files added most recently, so "these two documents" can be understood
     chat_user_messages: list[str] | None = None  # everything the user typed in this chat, so small details they stated can be remembered
 
 @app.post("/query")
@@ -252,7 +359,7 @@ def query_documents(request: QueryRequest, current_user: dict | None = Depends(g
     user_id = current_user["user_id"] if current_user else None
     scope = request.source_files or request.source_file
     result = agent_query(request.question, user_id, source_file=scope, history=request.history,
-                         user_messages=request.chat_user_messages)
+                         user_messages=request.chat_user_messages, recent_uploads=request.recent_uploads)
     return {
         "question": request.question,
         "answer": result["answer"],
