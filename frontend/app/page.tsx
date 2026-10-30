@@ -35,6 +35,14 @@ interface Message {
   sources?: string[];
   sourceRefs?: { file: string; pages: number[] }[];
   attachments?: string[]; // PDFs attached to this question (shown as file cards)
+  reading?: string; // set while PDFs are still being read: this message is replaced when they are ready
+  uploads?: UploadItem[]; // status cards for PDFs added without a question
+}
+
+interface UploadItem {
+  name: string;
+  status: "reading" | "ready" | "failed";
+  note?: string; // for example "Already uploaded", or why reading failed
 }
 
 const MAX_ATTACHMENTS = 10;
@@ -386,6 +394,9 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploadedDocs, setUploadedDocs] = useState<string[]>([]);
+  const watchedJobs = useRef<Set<string>>(new Set()); // upload jobs already being followed
+  const tokenRef = useRef<string | null>(null); // always the current login token
+  const recentUploads = useRef<string[]>([]); // the files added last, so "these two documents" can be understood
   const [token, setToken] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -432,16 +443,23 @@ export default function Home() {
       .catch(() => {});
   }, [token]);
 
+  useEffect(() => {
+    tokenRef.current = token;
+  }, [token]);
+
   // ── Chat history: saved on the server, one history per user ──
   // `chatReadyFor` is the user whose saved chat has been loaded. Nothing is
   // saved before that, so a failed load can never overwrite the real history.
   const localChatKey = userEmail ? `chatHistory:${userEmail}` : null;
   const [chatReadyFor, setChatReadyFor] = useState<string | null>(null);
+  const [authChecked, setAuthChecked] = useState(false); // the saved login has been looked up
+  const [chatChecked, setChatChecked] = useState<string | null>(null); // the user whose saved chat has been tried
 
   // When a user is logged in (or logs in again), bring back their saved chat.
   useEffect(() => {
     if (!token || !userEmail) {
       setChatReadyFor(null);
+      setChatChecked(null);
       return;
     }
     let cancelled = false;
@@ -469,10 +487,14 @@ export default function Home() {
           localStorage.removeItem(oldLocalKey);
         } catch {}
         setChatReadyFor(userEmail);
+        setChatChecked(userEmail);
       })
       .catch(() => {
         // Server not reachable: show the browser copy, but do not save anything.
-        if (!cancelled) setMessages(readLocal());
+        if (!cancelled) {
+          setMessages(readLocal());
+          setChatChecked(userEmail);
+        }
       });
     return () => {
       cancelled = true;
@@ -486,7 +508,8 @@ export default function Home() {
       fetch("http://127.0.0.1:8000/chat", {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ messages: messages.slice(-100) }),
+        // a "Reading…" message is temporary, it is never saved
+        body: JSON.stringify({ messages: messages.filter((m) => !m.reading).slice(-100) }),
       }).catch(() => {
         /* saving failed - the chat still works, it just won't be saved this time */
       });
@@ -521,6 +544,7 @@ export default function Home() {
         setUserEmail(savedEmail);
       }
     }
+    setAuthChecked(true);
   }, []);
 
 
@@ -615,7 +639,7 @@ export default function Home() {
         source_refs: { file: string; pages: number[] }[];
       }[] = [];
       for (let i = 0; i < past.length - 1; i++) {
-        if (past[i].role === "user" && past[i + 1]?.role === "assistant") {
+        if (past[i].role === "user" && past[i + 1]?.role === "assistant" && !past[i + 1].uploads) {
           recentHistory.push({
             question: past[i].content,
             answer: past[i + 1].content,
@@ -641,6 +665,7 @@ export default function Home() {
           history: lastFewTurns,
           chat_user_messages: chatUserMessages,
           ...(scope && scope.length ? { source_files: scope } : {}),
+          recent_uploads: recentUploads.current,
         }),
       });
       const data = await res.json();
@@ -665,10 +690,11 @@ export default function Home() {
     }
   };
 
-  // Upload one PDF without adding chat messages. Returns the name it is stored under.
+  // Send one PDF to the server. The server answers at once and reads the file in the
+  // background, so this returns a job to follow (or says the file was already there).
   const uploadOne = async (
     file: File,
-  ): Promise<{ name?: string; already?: boolean; error?: string }> => {
+  ): Promise<{ name?: string; already?: boolean; jobId?: string; error?: string }> => {
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -681,12 +707,121 @@ export default function Home() {
       if (!res.ok || !data.filename) {
         return { error: data.detail ?? `I couldn't process "${file.name}".` };
       }
-      setUploadedDocs((prev) => [...new Set([...prev, data.filename])]);
+      if (data.status === "reading") {
+        return { name: data.filename, jobId: data.job_id };
+      }
+      setUploadedDocs((prev) => (prev.includes(data.filename) ? prev : [data.filename, ...prev]));
       return { name: data.filename, already: data.chunks_stored === 0 };
     } catch {
       return { error: `I couldn't process "${file.name}".` };
     }
   };
+
+  // One file is finished reading: add it to the document list.
+  const finishDoc = (name: string, ok: boolean) => {
+    if (ok) setUploadedDocs((prev) => (prev.includes(name) ? prev : [name, ...prev])); // newest first
+  };
+
+  // Follow upload jobs until each one is done or has failed. onFinished is called
+  // once per file. A lost connection is retried for a while, then counts as a failure.
+  const waitForJobs = async (
+    jobs: { id: string; name: string }[],
+    authToken: string,
+    onFinished?: (job: { id: string; name: string }, ok: boolean, error?: string) => void,
+  ) => {
+    const results: Record<string, { ok: boolean; error?: string }> = {};
+    let misses = 0;
+    while (Object.keys(results).length < jobs.length) {
+      if (tokenRef.current !== authToken) return results; // logged out meanwhile
+      await new Promise((r) => setTimeout(r, 1500));
+      const pending = jobs.filter((j) => !(j.id in results));
+      let status: Record<string, { status: string; error?: string }> | null = null;
+      try {
+        const res = await fetch(
+          `http://127.0.0.1:8000/upload/status?ids=${pending.map((j) => j.id).join(",")}`,
+          { headers: { Authorization: `Bearer ${authToken}` } },
+        );
+        status = res.ok ? ((await res.json()).jobs ?? null) : null;
+      } catch {
+        status = null;
+      }
+      if (!status) {
+        misses += 1;
+        if (misses < 6) continue;
+        for (const j of pending) {
+          results[j.id] = { ok: false, error: "I lost the connection to the server." };
+          finishDoc(j.name, false);
+          onFinished?.(j, false, results[j.id].error);
+        }
+        break;
+      }
+      misses = 0;
+      for (const j of pending) {
+        const info = status[j.id];
+        if (!info || info.status === "reading") continue;
+        const ok = info.status === "done";
+        results[j.id] = { ok, error: info.error ?? undefined };
+        finishDoc(j.name, ok);
+        onFinished?.(j, ok, info.error ?? undefined);
+      }
+    }
+    return results;
+  };
+
+  // Files sent without a question: status cards appear in the chat (Reading… turns into
+  // Ready when the file is done). The chat stays free to use meanwhile.
+  const watchInBackground = async (
+    jobs: { id: string; name: string }[],
+    authToken: string,
+    alsoThere: string[] = [],
+  ) => {
+    jobs.forEach((j) => watchedJobs.current.add(j.id));
+    const key = jobs.map((j) => j.id).join(",");
+    const known: UploadItem[] = alsoThere.map((name) => ({ name, status: "ready", note: "Already uploaded" }));
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        content: "Reading documents",
+        reading: key,
+        uploads: [...known, ...jobs.map((j) => ({ name: j.name, status: "reading" as const }))],
+      },
+    ]);
+    const results = await waitForJobs(jobs, authToken);
+    if (tokenRef.current !== authToken) return;
+    const ready = jobs.filter((j) => results[j.id]?.ok).map((j) => j.name);
+    if (ready.length + alsoThere.length > 0) recentUploads.current = [...alsoThere, ...ready];
+    const finished: UploadItem[] = jobs.map((j) =>
+      results[j.id]?.ok
+        ? { name: j.name, status: "ready" as const }
+        : { name: j.name, status: "failed" as const, note: results[j.id]?.error ?? "This PDF could not be read." },
+    );
+    const done: Message = {
+      role: "assistant",
+      content: "Documents finished reading",
+      uploads: [...known, ...finished],
+    };
+    setMessages((prev) =>
+      prev.some((m) => m.reading === key)
+        ? prev.map((m) => (m.reading === key ? done : m))
+        : [...prev, done],
+    );
+  };
+
+  // Files that were still being read when the page was opened (for example after a refresh).
+  useEffect(() => {
+    if (!token || !userEmail || chatReadyFor !== userEmail) return; // wait until the saved chat is loaded
+    fetch("http://127.0.0.1:8000/upload/status", { headers: { Authorization: `Bearer ${token}` } })
+      .then((res) => res.json())
+      .then((data) => {
+        const active = Object.values(data.jobs ?? {}) as { job_id: string; filename: string }[];
+        const fresh = active.filter((j) => !watchedJobs.current.has(j.job_id));
+        if (fresh.length === 0) return;
+        void watchInBackground(fresh.map((j) => ({ id: j.job_id, name: j.filename })), token);
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, userEmail, chatReadyFor]);
 
   const handleSend = async () => {
     if (loading) return;
@@ -718,20 +853,21 @@ export default function Home() {
     try {
       let scope: string[] | undefined;
       if (files.length > 0) {
-        // Read the attached files first (they join the knowledge base).
+        // Send the attached files first (they join the knowledge base once they are read).
         const stored: string[] = [];
-        const added: string[] = [];
         const already: string[] = [];
+        const jobs: { id: string; name: string }[] = [];
         for (let i = 0; i < files.length; i++) {
           setBusyLabel(
             files.length > 1
-              ? `Reading document ${i + 1} of ${files.length}…`
-              : "Reading your document…",
+              ? `Sending document ${i + 1} of ${files.length}…`
+              : "Sending your document…",
           );
           const result = await uploadOne(files[i]);
           if (result.name) {
             stored.push(result.name);
-            (result.already ? already : added).push(result.name);
+            if (result.jobId) jobs.push({ id: result.jobId, name: result.name });
+            else if (result.already) already.push(result.name);
           } else {
             setMessages((prev) => [
               ...prev,
@@ -739,23 +875,59 @@ export default function Home() {
             ]);
           }
         }
-        setBusyLabel(null);
 
         if (!question) {
-          // Only files, no question: just confirm they were added.
-          const lines: string[] = [];
-          if (added.length === 1) lines.push(`Uploaded "${added[0]}"`);
-          if (added.length > 1)
-            lines.push(`Uploaded ${added.length} documents: ${added.map((n) => `"${n}"`).join(", ")}`);
-          already.forEach((n) => lines.push(`"${n}" is already uploaded.`));
-          if (lines.length) {
-            setMessages((prev) => [...prev, { role: "assistant", content: lines.join("\n") }]);
+          // Only files, no question: the server reads them in the background, the chat stays free.
+          setBusyLabel(null);
+          if (jobs.length > 0) {
+            // status cards in the chat show the progress
+            void watchInBackground(jobs, token as string, already);
+          } else if (already.length) {
+            recentUploads.current = [...already];
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content: "Already uploaded",
+                uploads: already.map((name) => ({ name, status: "ready" as const, note: "Already uploaded" })),
+              },
+            ]);
           }
           return;
         }
 
+        // A question about the files: wait until they are read, showing the progress.
+        if (jobs.length > 0) {
+          const total = files.length;
+          const alreadyDone = stored.length - jobs.length;
+          let finished = 0;
+          const label = () =>
+            total > 1
+              ? `Reading document ${Math.min(alreadyDone + finished + 1, total)} of ${total}…`
+              : "Reading your document…";
+          setBusyLabel(label());
+          jobs.forEach((j) => watchedJobs.current.add(j.id));
+          const results = await waitForJobs(jobs, token as string, () => {
+            finished += 1;
+            setBusyLabel(label());
+          });
+          for (const j of jobs) {
+            const r = results[j.id];
+            if (!r || !r.ok) {
+              const index = stored.indexOf(j.name);
+              if (index >= 0) stored.splice(index, 1);
+              setMessages((prev) => [
+                ...prev,
+                { role: "assistant", content: `I couldn't read "${j.name}". ${r?.error ?? ""}`.trim() },
+              ]);
+            }
+          }
+        }
+        setBusyLabel(null);
+
         if (stored.length === 0) return; // nothing could be read, nothing to ask about
         scope = [...new Set(stored)];
+        recentUploads.current = scope;
         // show the names the documents are really stored under
         setMessages((prev) =>
           prev.map((m, i) => (i === questionIndex ? { ...m, attachments: scope } : m)),
@@ -857,7 +1029,10 @@ export default function Home() {
       ),
     );
   const userInitial = userEmail ? userEmail[0].toUpperCase() : "U";
-  const isEmpty = messages.length === 0;
+  // While the saved login and chat are being brought back, show a quiet placeholder
+  // instead of flashing the empty welcome screen.
+  const chatLoading = !authChecked || (!!token && !!userEmail && chatChecked !== userEmail);
+  const isEmpty = messages.length === 0 && !chatLoading;
 
   return (
     <div
@@ -1061,6 +1236,19 @@ export default function Home() {
               </div>
             )}
 
+            {/* Placeholder while the saved chat is loading */}
+            {chatLoading && (
+              <div className="space-y-5" aria-label="Loading your chat">
+                <div className="flex justify-end">
+                  <div className="h-11 w-52 animate-pulse rounded-2xl rounded-br-sm bg-[#E6E0D2]" />
+                </div>
+                <div className="flex items-end gap-2.5">
+                  <div className="h-7 w-7 flex-shrink-0 animate-pulse rounded-full bg-[#E6E0D2]" />
+                  <div className="h-20 w-2/3 animate-pulse rounded-2xl rounded-bl-sm bg-[#E6E0D2]" />
+                </div>
+              </div>
+            )}
+
             {/* Chat messages */}
             {messages.map((msg, i) => (
               <div
@@ -1074,7 +1262,45 @@ export default function Home() {
                   </div>
                 )}
 
-                {msg.attachments && msg.attachments.length > 0 ? (
+                {msg.uploads ? (
+                  <div className="flex w-full max-w-sm flex-col gap-2">
+                    {msg.uploads.map((u) => (
+                      <div
+                        key={u.name}
+                        className="flex items-center gap-3 rounded-xl border border-[#E0DBD3] bg-white px-3 py-2.5 shadow-sm"
+                      >
+                        <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-red-50 text-[10px] font-bold text-red-600">
+                          PDF
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[13px] font-medium text-[#1C1C1E]">{u.name}</span>
+                          {u.status === "reading" && (
+                            <>
+                              <span className="mt-0.5 flex items-center gap-1.5 text-[11.5px] text-[#6B6B6B]">
+                                <span className="h-3 w-3 animate-spin rounded-full border-2 border-[#B8CFB3] border-t-[#5E7C5C]" />
+                                Reading…
+                              </span>
+                              <span className="mt-1.5 block h-1 w-full animate-pulse rounded-full bg-[#B8CFB3]" />
+                            </>
+                          )}
+                          {u.status === "ready" && (
+                            <span className="mt-0.5 flex items-center gap-1 text-[11.5px] text-[#5E7C5C]">
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                              {u.note ?? "Ready"}
+                            </span>
+                          )}
+                          {u.status === "failed" && (
+                            <span className="mt-0.5 block text-[11.5px] text-red-600">
+                              Couldn&apos;t read · {u.note}
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : msg.attachments && msg.attachments.length > 0 ? (
                   <div className="flex max-w-[80%] flex-col items-end gap-1.5">
                     {msg.attachments.map((name) => (
                       <button
