@@ -138,6 +138,22 @@ def _title_above(page, box, other_boxes):
     return title if len(title) <= 80 else ""
 
 
+_UTF16_RUN = re.compile(r"(?:[\x00-\x07][\x00-\xff])+")
+
+
+def _clean_extracted_text(text):
+    """Some PDFs store text as 2-byte characters (every letter has a hidden 0x00 in front,
+    like "\\x00M\\x00i\\x00l"). Decode those runs back into normal text, so letters such as
+    "ć" survive, and drop any NUL (0x00) that is left, because the database cannot store it."""
+    def decode(match):
+        run = match.group(0)
+        try:
+            return run.encode("latin-1").decode("utf-16-be")
+        except UnicodeError:
+            return run
+    return _UTF16_RUN.sub(decode, text).replace("\x00", "")
+
+
 def ocr_pdf(pdf_path, lang="eng"):
     """Read a scanned PDF (pages that are only images) by recognising the text with OCR."""
     doc = fitz.open(pdf_path)
@@ -191,7 +207,7 @@ def ocr_pdf(pdf_path, lang="eng"):
                 label = f"Table {t_idx + 1} on Page {page_num + 1}" + (f" - {title}" if title else "")
                 full_text += f"\n\n[{label}]\n{_format_table(table)}"
 
-    return full_text
+    return _clean_extracted_text(full_text)
 
 
 _HEADING_RE = re.compile(r"^[A-Z][A-Z &/,\-]{3,40}$")
@@ -425,10 +441,14 @@ Answer:"""
 
 
 def list_documents(user_id):
-    """List the names of the PDFs this user has uploaded."""
+    """List the names of the PDFs this user has uploaded, the newest first."""
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT DISTINCT source_file FROM document_chunks WHERE user_id = %s;", (user_id,))
+    cur.execute(
+        "SELECT source_file FROM document_chunks WHERE user_id = %s "
+        "GROUP BY source_file ORDER BY MAX(id) DESC;",
+        (user_id,),
+    )
     results = cur.fetchall()
     cur.close()
     conn.close()
@@ -813,6 +833,16 @@ _SUMMARY_REQUEST = re.compile(
 _OVERVIEW_ALL = re.compile(
     r"\b(overview|summary|summari[sz]e|describe|tell\s+me\s+about)\b.{0,40}\b(all|each|every)\b.{0,20}\b(documents?|files?|pdfs?)\b",
     re.IGNORECASE)
+
+
+# "these two documents", "the file I just uploaded": the files added most recently.
+_ABOUT_UPLOADS = re.compile(
+    r"\b(?:these|those|both)\s+(?:(?:two|three|four|five|six|\d+)\s+)?(?:new\s+)?(?:documents?|docs?|files?|pdfs?)\b"
+    r"|\bjust\s+(?:uploaded|added|attached|gave|given|give|sent|shared|provided|put)\b"
+    r"|\b(?:i|we)(?:\s+have|\s+had|'ve)?\s+(?:just\s+)?(?:uploaded|attached|gave|given|sent|shared|provided|added)\b"
+    r"|\bnew(?:ly)?\s+(?:uploaded\s+)?(?:documents?|files?|pdfs?)\b",
+    re.IGNORECASE)
+_SUMMARY_WORDS = re.compile(r"\b(summari[sz]e|summary|overview|gist)\b", re.IGNORECASE)
 
 
 def agent_decide_action(query):
@@ -1438,13 +1468,23 @@ def add_following_chunks(results, user_id, max_total=10):
     return combined if len(combined) <= max_total else list(results)
 
 
-def agent_query(query, user_id, source_file=None, history=None, user_messages=None):
+def agent_query(query, user_id, source_file=None, history=None, user_messages=None, recent_uploads=None):
     """Entry point for every question: decides what kind of request it is (list documents, summarise, table or key-value extraction, chat, or document search) and answers it."""
     full_history = history or []
     history = _trim_history(history)  # long answers cut short, so prompts stay small
     notes = extract_notes((user_messages or []) + [query])  # facts the user stated earlier in this chat
     action = agent_decide_action(query)
     scope = _as_scope(source_file)  # files the user picked for this question (none = all documents)
+
+    # "Summarize these two documents I just gave you": the files added most recently.
+    if not scope and recent_uploads and user_id is not None and _ABOUT_UPLOADS.search(query):
+        existing = set(list_documents(user_id))
+        picked = [d for d in recent_uploads if d in existing]
+        if picked:
+            scope = picked
+    # Several documents to summarise: one short summary per document.
+    if len(scope or []) >= 2 and action in ("SUMMARY", "SEARCH", "CHAT") and _SUMMARY_WORDS.search(query):
+        action = "OVERVIEW"
 
     # The reply to "Which document would you like summarized?": a document name, or "this one".
     if (user_id is not None and history and str(history[-1].get("answer", "")).startswith(_ASK_WHICH)
