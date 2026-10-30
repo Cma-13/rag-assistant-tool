@@ -9,6 +9,7 @@ from sentence_transformers import SentenceTransformer
 import psycopg2
 from dotenv import load_dotenv
 import re
+from concurrent.futures import ThreadPoolExecutor, Future
 from llm import generate as llm_generate, groq_chat, generate_json, LLMBusyError, PROVIDER as LLM_PROVIDER
 import pdfplumber
 
@@ -97,6 +98,14 @@ def _format_table(table):
 # so huge that digits were misread (3 -> 5, 6 -> 0) and whole lines were lost,
 # while a small A4 page still needs about 4x to reach it.
 OCR_TARGET_WIDTH_PX = 2400
+# Picture-only pages are read with OCR several at a time (Tesseract runs as a separate
+# program, so the pages really are read side by side). Set OCR_WORKERS in .env to change it.
+OCR_WORKERS = max(1, int(os.getenv("OCR_WORKERS", min(4, os.cpu_count() or 1))))
+
+
+def _ocr_png(png_bytes, lang):
+    """Read the text on one page picture."""
+    return pytesseract.image_to_string(Image.open(io.BytesIO(png_bytes)), lang=lang)
 
 
 def _page_text_outside_tables(page, boxes):
@@ -177,35 +186,49 @@ def ocr_pdf(pdf_path, lang="eng"):
     except Exception:
         tables_by_page, boxes_by_page = {}, {}
 
-    for page_num, page in enumerate(doc):
-        has_text_layer = bool(page.get_text().strip())
-        native_text = _page_text_outside_tables(page, boxes_by_page.get(page_num, []))
+    # Pages with a real text layer are read directly. Picture-only pages go to OCR, several at
+    # a time; each result is put back in its page position afterwards.
+    if OCR_WORKERS > 1:
+        os.environ.setdefault("OMP_THREAD_LIMIT", "1")  # one Tesseract thread per page, the pages run side by side
+    page_parts = []  # (page_num, text or Future, table text)
+    pending = []
+    with ThreadPoolExecutor(max_workers=OCR_WORKERS) as pool:
+        for page_num, page in enumerate(doc):
+            has_text_layer = bool(page.get_text().strip())
+            native_text = _page_text_outside_tables(page, boxes_by_page.get(page_num, []))
 
-        if has_text_layer:
-            # (a page that is entirely a table leaves no loose text; that is fine,
-            # it must not be sent to OCR)
-            # Digitally-generated page with a real text layer: use it
-            # directly. This is exact, unlike OCR, which reconstructs text
-            # from pixels and can drop or scramble content.
-            text = native_text
-        else:
-            # No embedded text (a genuinely scanned page) -> fall back to OCR.
-            zoom = min(max(OCR_TARGET_WIDTH_PX / page.rect.width, 1), 4)
-            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-            img_data = pix.tobytes("png")
-            image = Image.open(io.BytesIO(img_data))
-            # Default page-segmentation mode: it also reads light text on
-            # coloured bands (table headers, footers), which --psm 6 skipped.
-            text = pytesseract.image_to_string(image, lang=lang)
+            if has_text_layer:
+                # (a page that is entirely a table leaves no loose text; that is fine,
+                # it must not be sent to OCR)
+                # Digitally-generated page with a real text layer: use it
+                # directly. This is exact, unlike OCR, which reconstructs text
+                # from pixels and can drop or scramble content.
+                text = native_text
+            else:
+                # No embedded text (a genuinely scanned page) -> fall back to OCR.
+                zoom = min(max(OCR_TARGET_WIDTH_PX / page.rect.width, 1), 4)
+                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                # Default page-segmentation mode: it also reads light text on
+                # coloured bands (table headers, footers), which --psm 6 skipped.
+                text = pool.submit(_ocr_png, pix.tobytes("png"), lang)
+                pending.append(text)
+                if len(pending) >= OCR_WORKERS * 2:
+                    pending.pop(0).result()  # wait for the oldest, so pictures do not pile up in memory
 
-        full_text += f"\n--- Page {page_num + 1} ---\n{text}"
+            table_text = ""
+            if page_num in tables_by_page:
+                boxes = boxes_by_page[page_num]
+                for t_idx, table in enumerate(tables_by_page[page_num]):
+                    title = _title_above(page, boxes[t_idx], boxes) if has_text_layer else ""
+                    label = f"Table {t_idx + 1} on Page {page_num + 1}" + (f" - {title}" if title else "")
+                    table_text += f"\n\n[{label}]\n{_format_table(table)}"
+            page_parts.append((page_num, text, table_text))
 
-        if page_num in tables_by_page:
-            boxes = boxes_by_page[page_num]
-            for t_idx, table in enumerate(tables_by_page[page_num]):
-                title = _title_above(page, boxes[t_idx], boxes) if has_text_layer else ""
-                label = f"Table {t_idx + 1} on Page {page_num + 1}" + (f" - {title}" if title else "")
-                full_text += f"\n\n[{label}]\n{_format_table(table)}"
+    full_text = ""
+    for page_num, text, table_text in page_parts:
+        if isinstance(text, Future):
+            text = text.result()
+        full_text += f"\n--- Page {page_num + 1} ---\n{text}{table_text}"
 
     return _clean_extracted_text(full_text)
 
