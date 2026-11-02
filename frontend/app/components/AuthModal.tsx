@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { GoogleOAuthProvider, GoogleLogin } from "@react-oauth/google";
+import { API_URL } from "../config";
 
 // The Client ID is public (it is not a secret), so it is safe to keep here.
 const GOOGLE_CLIENT_ID =
@@ -31,7 +32,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
 
     try {
       const endpoint = mode === "login" ? "/login" : "/signup";
-      const res = await fetch(`http://127.0.0.1:8000${endpoint}`, {
+      const res = await fetch(`${API_URL}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
@@ -59,7 +60,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
     setError("");
     setLoading(true);
     try {
-      const res = await fetch("http://127.0.0.1:8000/auth/google", {
+      const res = await fetch(`${API_URL}/auth/google`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ credential }),
