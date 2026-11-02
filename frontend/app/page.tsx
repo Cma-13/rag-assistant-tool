@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import AuthModal from "./components/AuthModal";
+import { API_URL } from "./config";
 
 function isTokenExpired(token: string): boolean {
   try {
@@ -435,7 +436,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!token) return;
-    fetch("http://127.0.0.1:8000/documents", {
+    fetch(`${API_URL}/documents`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((res) => res.json())
@@ -473,7 +474,7 @@ export default function Home() {
       }
     };
 
-    fetch("http://127.0.0.1:8000/chat", {
+    fetch(`${API_URL}/chat`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((res) => (res.ok ? res.json() : Promise.reject()))
@@ -505,7 +506,7 @@ export default function Home() {
   useEffect(() => {
     if (!token || !userEmail || chatReadyFor !== userEmail) return;
     const timer = setTimeout(() => {
-      fetch("http://127.0.0.1:8000/chat", {
+      fetch(`${API_URL}/chat`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         // a "Reading…" message is temporary, it is never saved
@@ -520,7 +521,7 @@ export default function Home() {
   const handleClearChat = () => {
     setMessages([]);
     if (token) {
-      fetch("http://127.0.0.1:8000/chat", {
+      fetch(`${API_URL}/chat`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       }).catch(() => {});
@@ -570,7 +571,7 @@ export default function Home() {
     setDeletingDoc(name);
     try {
       const res = await fetch(
-        `http://127.0.0.1:8000/documents?name=${encodeURIComponent(name)}`,
+        `${API_URL}/documents?name=${encodeURIComponent(name)}`,
         { method: "DELETE", headers: { Authorization: `Bearer ${token}` } },
       );
       if (!res.ok) throw new Error("delete failed");
@@ -604,7 +605,7 @@ export default function Home() {
     };
     try {
       const res = await fetch(
-        `http://127.0.0.1:8000/documents/file?name=${encodeURIComponent(name)}`,
+        `${API_URL}/documents/file?name=${encodeURIComponent(name)}`,
         { headers: { Authorization: `Bearer ${token}` } },
       );
       if (!res.ok) {
@@ -657,7 +658,7 @@ export default function Home() {
         .map((m) => m.content.slice(0, 200))
         .slice(-60);
 
-      const res = await fetch("http://127.0.0.1:8000/query", {
+      const res = await fetch(`${API_URL}/query`, {
         method: "POST",
         headers,
         body: JSON.stringify({
@@ -698,7 +699,7 @@ export default function Home() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const res = await fetch("http://127.0.0.1:8000/upload", {
+      const res = await fetch(`${API_URL}/upload`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
@@ -738,7 +739,7 @@ export default function Home() {
       let status: Record<string, { status: string; error?: string }> | null = null;
       try {
         const res = await fetch(
-          `http://127.0.0.1:8000/upload/status?ids=${pending.map((j) => j.id).join(",")}`,
+          `${API_URL}/upload/status?ids=${pending.map((j) => j.id).join(",")}`,
           { headers: { Authorization: `Bearer ${authToken}` } },
         );
         status = res.ok ? ((await res.json()).jobs ?? null) : null;
@@ -811,7 +812,7 @@ export default function Home() {
   // Files that were still being read when the page was opened (for example after a refresh).
   useEffect(() => {
     if (!token || !userEmail || chatReadyFor !== userEmail) return; // wait until the saved chat is loaded
-    fetch("http://127.0.0.1:8000/upload/status", { headers: { Authorization: `Bearer ${token}` } })
+    fetch(`${API_URL}/upload/status`, { headers: { Authorization: `Bearer ${token}` } })
       .then((res) => res.json())
       .then((data) => {
         const active = Object.values(data.jobs ?? {}) as { job_id: string; filename: string }[];
