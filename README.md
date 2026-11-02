@@ -260,6 +260,30 @@ The MCP server lets an MCP client (for example Claude Desktop) use your knowledg
 ```
 It provides three tools: `list_my_documents`, `search_documents` and `summarize_document`.
 
+### Run with Docker (optional)
+
+Docker starts the database, backend and frontend together, so nothing has to be installed by hand except Docker Desktop and Ollama.
+
+1. Make sure `backend/.env` exists (it needs at least `DB_PASSWORD`, plus your Groq key if you use Groq)
+2. Start Ollama on your computer if you use it (`ollama serve`; the backend container reaches it through `host.docker.internal`)
+3. From the project folder run:
+
+```bash
+docker compose --env-file backend/.env up --build
+```
+
+4. Open `http://localhost:3000`
+
+The first build is slow because it downloads PyTorch and the embedding model; later starts are fast. The Docker database is separate from a local Postgres, so it starts empty: sign up again and re-upload your documents. Data is kept in Docker volumes (`pgdata`, `uploads`, `models`) and survives restarts; `docker compose down -v` deletes it.
+
+For development inside Docker (code changes reload when you save), add the dev file:
+
+```bash
+docker compose --env-file backend/.env -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+Settings the containers use: `DB_HOST`, `CORS_ORIGINS`, `OLLAMA_HOST` (all set in `docker-compose.yml`) and `NEXT_PUBLIC_API_URL` (the address the browser uses for the backend, set at build time).
+
 ---
 
 ## Usage
