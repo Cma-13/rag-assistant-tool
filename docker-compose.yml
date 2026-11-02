@@ -1,0 +1,55 @@
+# Starts the whole project: database, backend and frontend.
+#
+#   docker compose --env-file backend/.env up --build
+#
+# Then open http://localhost:3000
+# (Ollama is not started here: the backend uses the Ollama on your own computer.)
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: document_query_db
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in backend/.env and start with --env-file backend/.env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d document_query_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      DB_HOST: db
+      CORS_ORIGINS: http://localhost:3000
+      OLLAMA_HOST: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads:/app/uploads   # the stored PDFs
+      - models:/models         # the downloaded embedding model, so it is fetched only once
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      target: prod
+      args:
+        NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  uploads:
+  models:
