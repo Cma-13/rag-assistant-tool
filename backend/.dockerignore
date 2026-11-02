@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+.env
+uploads/
+cleaned_output.txt
