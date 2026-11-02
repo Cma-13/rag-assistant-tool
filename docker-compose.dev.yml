@@ -1,0 +1,24 @@
+# For working on the code inside Docker: your files are linked into the containers, and the
+# backend and frontend reload when you save a file.
+#
+#   docker compose --env-file backend/.env -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+services:
+  backend:
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+      - models:/models
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    environment:
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+      WATCHPACK_POLLING: "true"   # so file changes are noticed on Windows
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
