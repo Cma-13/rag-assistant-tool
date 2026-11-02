@@ -21,6 +21,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+# Websites allowed to call this API (comma separated). Default: the local frontend.
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 
 app = FastAPI()
 
@@ -146,7 +148,7 @@ def google_login(request: GoogleLoginRequest):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Next.js dev server
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
