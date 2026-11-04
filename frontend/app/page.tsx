@@ -1433,14 +1433,17 @@ export default function Home() {
                   <BotIcon />
                 </div>
                 <div className="rounded-2xl rounded-bl-sm border border-[#E0DBD3] bg-white px-4 py-3 shadow-sm">
-                  <span className="flex items-center gap-1">
-                    <span className="typing-dot inline-block h-2 w-2 rounded-full bg-[#9A968C]" />
-                    <span className="typing-dot inline-block h-2 w-2 rounded-full bg-[#9A968C]" />
-                    <span className="typing-dot inline-block h-2 w-2 rounded-full bg-[#9A968C]" />
-                    {busyLabel && (
-                      <span className="ml-2 text-[12.5px] text-[#9A968C]">{busyLabel}</span>
-                    )}
-                  </span>
+                  {busyLabel ? (
+                    // while a document is really being read: just the words, with a moving shine
+                    <span className="shimmer-text text-[13.5px] font-medium">{busyLabel}</span>
+                  ) : (
+                    // otherwise (thinking about the answer): just the three dots
+                    <span className="flex items-center gap-1">
+                      <span className="typing-dot inline-block h-2 w-2 rounded-full bg-[#9A968C]" />
+                      <span className="typing-dot inline-block h-2 w-2 rounded-full bg-[#9A968C]" />
+                      <span className="typing-dot inline-block h-2 w-2 rounded-full bg-[#9A968C]" />
+                    </span>
+                  )}
                 </div>
               </div>
             )}
