@@ -1682,7 +1682,7 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
             answer = llm_generate(
                 f"{ASSISTANT_BACKGROUND}\nAnswer the question below briefly (1 to 3 sentences), only from the description above. "
                 f"Do not make up abilities.\n\nQuestion: {query}",
-                num_predict=150)
+                num_predict=150, prefer_local=(user_id is None))
         else:
             # Ordinary small talk: just chat, without bringing up PDFs. The earlier
             # conversation is included, so "what's my name?" can be answered.
@@ -1693,7 +1693,7 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
                 "something that was not said, say you don't remember it being mentioned. You cannot see the user's "
                 "documents in this reply, so never describe what a document says: if they want something from a "
                 "document, ask them to put it as a question.\n\n"
-                + (context + "\n\n" if context else "") + f"Message: {query}", num_predict=120)
+                + (context + "\n\n" if context else "") + f"Message: {query}", num_predict=120, prefer_local=(user_id is None))
         return {"answer": answer, "sources": [], "action_taken": "CHAT"}
 
     else:  # SEARCH
