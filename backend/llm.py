@@ -43,10 +43,19 @@ def _call_groq(prompt, num_predict, temperature):
     return response.choices[0].message.content or ""
 
 
-def generate(prompt, num_predict=200, temperature=0.1):
+def generate(prompt, num_predict=200, temperature=0.1, prefer_local=False):
     """Send a prompt to the configured LLM provider. If Groq is active but
     rate-limited or unreachable, fall back to the local Ollama model for that
-    one request, so the app keeps working instead of failing outright."""
+    one request, so the app keeps working instead of failing outright.
+
+    prefer_local=True is for easy jobs (small talk for visitors who are not logged in): the local Ollama model
+    answers, which saves the Groq usage limit for the harder questions. If Ollama
+    is not running, the normal provider is used instead."""
+    if prefer_local and PROVIDER == "groq":
+        try:
+            return _call_ollama(prompt, num_predict, temperature)
+        except Exception as e:
+            print(f"Ollama unavailable for chat ({type(e).__name__}), using Groq for this request.")
     if PROVIDER == "groq":
         try:
             return _call_groq(prompt, num_predict, temperature)
