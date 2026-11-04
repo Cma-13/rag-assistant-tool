@@ -83,3 +83,18 @@ body {
 .typing-dot:nth-child(2) { animation: typingBounce 1.2s ease-in-out 0.2s infinite; }
 .typing-dot:nth-child(3) { animation: typingBounce 1.2s ease-in-out 0.4s infinite; }
 
+/* "Reading your document…" text with a light that sweeps across it */
+@keyframes shimmerSweep {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+.shimmer-text {
+  background: linear-gradient(90deg, #8A9A86 0%, #8A9A86 35%, #4F6B4D 50%, #8A9A86 65%, #8A9A86 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: shimmerSweep 2.2s linear infinite;
+}
