@@ -638,6 +638,7 @@ export default function Home() {
         answer: string;
         sources: string[];
         source_refs: { file: string; pages: number[] }[];
+        attachments: string[];
       }[] = [];
       for (let i = 0; i < past.length - 1; i++) {
         if (past[i].role === "user" && past[i + 1]?.role === "assistant" && !past[i + 1].uploads) {
@@ -646,6 +647,7 @@ export default function Home() {
             answer: past[i + 1].content,
             sources: past[i + 1].sources ?? [],
             source_refs: past[i + 1].sourceRefs ?? [],
+            attachments: past[i].attachments ?? [], // files attached to this question
           });
         }
       }
