@@ -1086,6 +1086,10 @@ def _chat_context(history, notes):
 def _recent_source_doc(history):
     """The one document the recent answers came from, or None when it is unclear."""
     for turn in reversed((history or [])[-4:]):
+        # a file attached in that turn is the document in use from then on
+        attached = list(dict.fromkeys(turn.get("attachments") or []))
+        if attached:
+            return attached[0] if len(attached) == 1 else None
         sources = list(dict.fromkeys(turn.get("sources") or []))
         if sources:
             return sources[0] if len(sources) == 1 else None
@@ -1099,6 +1103,26 @@ _DEICTIC = re.compile(
     re.IGNORECASE)
 
 _ASK_WHICH = "Which document would you like summarized?"
+
+# "what is this?", "what's this about?", "what is this document?" asked with a file attached
+_WHAT_IS_THIS = re.compile(
+    r"^\s*(?:so\s+)?what(?:'s|s|\s+is|\s+are)?\s+(?:this|that|these|it)(?:\s+(?:document|doc|file|pdf|story))?(?:\s+about)?\s*[?!.]*\s*$",
+    re.IGNORECASE)
+
+_LOOSE_SKIP_WORDS = {"that", "this", "with", "from", "about", "them", "what", "your", "have", "pdf"}
+
+
+def _doc_mentioned_loosely(query, docs):
+    """The one document whose name has a distinctive word that the user typed
+    ('that story' -> 'A story.pdf'). None when no document, or more than one, fits."""
+    q_words = set(re.findall(r"[a-z0-9]+", query.lower()))
+    hits = []
+    for doc in docs:
+        words = re.findall(r"[a-z0-9]+", os.path.splitext(doc)[0].lower())
+        if any(len(w) >= 4 and w not in _GENERIC_NAME_WORDS and w not in _LOOSE_SKIP_WORDS and w in q_words
+               for w in words):
+            hits.append(doc)
+    return hits[0] if len(hits) == 1 else None
 
 
 # ── Follow-ups ─────────────────────────────────────────────────────────────
@@ -1506,6 +1530,28 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
         picked = [d for d in recent_uploads if d in existing]
         if picked:
             scope = picked
+            # "the one I just attached" is about those files, not small talk: the chat
+            # answer cannot see documents, so summarise them instead.
+            if action == "CHAT":
+                action = "SUMMARY" if len(picked) == 1 else "OVERVIEW"
+    # "what is this?" with a file attached means that file: summarise it
+    if scope and action in ("CHAT", "SEARCH") and _WHAT_IS_THIS.search(query):
+        action = "SUMMARY" if len(scope) == 1 else "OVERVIEW"
+    # A message that points at a document ("about that story man") but was taken for small
+    # talk, or for a search that would drag in the topic of an earlier answer: use the document
+    # it names, or the one we are talking about.
+    if (action in ("CHAT", "SEARCH") and user_id is not None and not scope and not _is_user_fact(query)
+            and not _ABOUT_CONVERSATION.search(query) and not _ABOUT_ASSISTANT.search(query)
+            and query.lower().strip("!.? ") not in GREETING_KEYWORDS
+            and (action == "CHAT" or _DEICTIC.search(query))):
+        docs_now = list_documents(user_id)
+        pointed = _doc_mentioned_loosely(query, docs_now)
+        if not pointed:
+            recent = _recent_source_doc(history)
+            pointed = recent if recent in docs_now and _DEICTIC.search(query) else None
+        if pointed:
+            scope = [pointed]
+            action = "SUMMARY" if ("?" not in query and len(query.split()) <= 8) else "SEARCH"
     # Several documents to summarise: one short summary per document.
     if len(scope or []) >= 2 and action in ("SUMMARY", "SEARCH", "CHAT") and _SUMMARY_WORDS.search(query):
         action = "OVERVIEW"
@@ -1557,7 +1603,9 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
     # Only rewrite for SEARCH — LIST/SUMMARY/CHAT should act on what the user
     # actually typed, since rewriting a short command like "what documents
     # do you have?" against unrelated prior topics can corrupt it.
-    if action == "SEARCH" and not elaborate:
+    # (not when the question is about files attached to it: "what is this?" means that file,
+    # and pulling in the topic of an earlier answer would search for the wrong thing)
+    if action == "SEARCH" and not elaborate and not scope:
         query = rewrite_query(query, history)
 
 
