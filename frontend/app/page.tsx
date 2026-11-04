@@ -942,7 +942,17 @@ export default function Home() {
   };
 
   // Put PDFs next to the question box (they are uploaded when the message is sent).
+  // Uploading needs an account: if the user is not logged in, show the login popup instead.
+  // Returns true when the user is logged in and may continue.
+  const requireLogin = () => {
+    if (token && !isTokenExpired(token)) return true;
+    if (token) handleSessionExpired(); // the login has run out: say so
+    setShowAuthModal(true);
+    return false;
+  };
+
   const attachFiles = (files: File[]) => {
+    if (!requireLogin()) return;
     const pdfs = files.filter((f) => f.name.toLowerCase().endsWith(".pdf"));
     if (pdfs.length < files.length) {
       setMessages((prev) => [
@@ -977,8 +987,40 @@ export default function Home() {
     setMessages([]); // the saved chat stays on the server for the next login
   };
 
+  // "Drop your PDF here" box. Moving the file over different parts of the page fires
+  // dragenter/dragleave many times (once per element), so they are counted: the box stays
+  // until the file has really left the page. (Hiding it on every dragleave made it flicker,
+  // and a drop in that moment was handed to the browser, which opened the PDF.)
+  const dragDepth = useRef(0);
+
+  const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setIsDragging(false);
+  };
+
+  // Safety net: a file dropped anywhere on the window must never make the browser open it.
+  useEffect(() => {
+    const stop = (e: DragEvent) => {
+      if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
+    };
+    window.addEventListener("dragover", stop);
+    window.addEventListener("drop", stop);
+    return () => {
+      window.removeEventListener("dragover", stop);
+      window.removeEventListener("drop", stop);
+    };
+  }, []);
+
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
+    dragDepth.current = 0;
     setIsDragging(false);
     const files = e.dataTransfer.files;
     if (files && files.length > 0) {
@@ -1038,11 +1080,11 @@ export default function Home() {
   return (
     <div
       className="flex h-screen flex-col bg-[#FEFAF3]"
+      onDragEnter={handleDragEnter}
       onDragOver={(e) => {
-        e.preventDefault();
-        setIsDragging(true);
+        if (e.dataTransfer?.types?.includes("Files")) e.preventDefault(); // allow dropping here
       }}
-      onDragLeave={() => setIsDragging(false)}
+      onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
       {/* Drag-and-drop overlay */}
@@ -1451,6 +1493,10 @@ export default function Home() {
                     ? `You can attach up to ${MAX_ATTACHMENTS} PDFs at once`
                     : "Attach PDFs"
                 }
+                onClick={(e) => {
+                  // not logged in: open the login popup instead of the file picker
+                  if (!requireLogin()) e.preventDefault();
+                }}
                 className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl text-[#6B6B6B] transition ${
                   loading || attachments.length >= MAX_ATTACHMENTS
                     ? "cursor-not-allowed opacity-40"
