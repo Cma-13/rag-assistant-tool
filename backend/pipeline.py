@@ -1,5 +1,6 @@
 import json
 import os
+from contextlib import contextmanager
 import io
 import pymupdf as fitz
 import pytesseract
@@ -29,6 +30,27 @@ def get_connection():
         user=os.getenv("DB_USER", "postgres"),
         password=DB_PASSWORD
     )
+
+
+@contextmanager
+def db_cursor(commit=False):
+    """A database cursor that always closes its connection, even when something fails
+    halfway (a plain open/close leaks the connection on an error). With commit=True the
+    changes are saved at the end; on an error they are rolled back."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        try:
+            yield cur
+            if commit:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+    finally:
+        conn.close()
 
 
 _NUMERIC_PIECE = re.compile(r"^[\d,.\-%]+$")
@@ -327,19 +349,15 @@ def store_chunks(source_file, chunks, embeddings, content_hash, user_id, pages=N
     """Save the chunks. `pages` (optional) is the page number of each chunk."""
     if pages is None:
         pages = [None] * len(chunks)
-    conn = get_connection()
-    cur = conn.cursor()
-    for chunk, embedding, page in zip(chunks, embeddings, pages):
-        cur.execute(
-            """
-            INSERT INTO document_chunks (source_file, page_number, chunk_text, embedding, content_hash, user_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (source_file, page, chunk, embedding.tolist(), content_hash, user_id)
-        )
-    conn.commit()
-    cur.close()
-    conn.close()
+    with db_cursor(commit=True) as cur:
+        for chunk, embedding, page in zip(chunks, embeddings, pages):
+            cur.execute(
+                """
+                INSERT INTO document_chunks (source_file, page_number, chunk_text, embedding, content_hash, user_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (source_file, page, chunk, embedding.tolist(), content_hash, user_id)
+            )
 
 
 def _keyword_query(text):
@@ -374,40 +392,35 @@ def retrieve_chunks(query, user_id, top_k=5, source_file=None, candidate_k=20):
         scope_sql += " AND source_file = ANY(%s)"
         scope_params.append(scope)
 
-    conn = get_connection()
-    cur = conn.cursor()
-
-    # 1. Semantic candidates (by meaning)
-    cur.execute(
-        f"""
-        SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
-        FROM document_chunks
-        WHERE {scope_sql}
-        ORDER BY distance ASC
-        LIMIT %s
-        """,
-        [query_embedding] + scope_params + [candidate_k]
-    )
-    semantic = cur.fetchall()
-
-    # 2. Keyword candidates (by actual words)
-    keyword = []
-    if keyword_q:
+    with db_cursor() as cur:
+        # 1. Semantic candidates (by meaning)
         cur.execute(
             f"""
             SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
             FROM document_chunks
             WHERE {scope_sql}
-              AND to_tsvector('english', chunk_text) @@ to_tsquery('english', %s)
-            ORDER BY ts_rank(to_tsvector('english', chunk_text), to_tsquery('english', %s)) DESC
+            ORDER BY distance ASC
             LIMIT %s
             """,
-            [query_embedding] + scope_params + [keyword_q, keyword_q, candidate_k]
+            [query_embedding] + scope_params + [candidate_k]
         )
-        keyword = cur.fetchall()
+        semantic = cur.fetchall()
 
-    cur.close()
-    conn.close()
+        # 2. Keyword candidates (by actual words)
+        keyword = []
+        if keyword_q:
+            cur.execute(
+                f"""
+                SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
+                FROM document_chunks
+                WHERE {scope_sql}
+                  AND to_tsvector('english', chunk_text) @@ to_tsquery('english', %s)
+                ORDER BY ts_rank(to_tsvector('english', chunk_text), to_tsquery('english', %s)) DESC
+                LIMIT %s
+                """,
+                [query_embedding] + scope_params + [keyword_q, keyword_q, candidate_k]
+            )
+            keyword = cur.fetchall()
 
     # 3. Merge the two ranked lists (Reciprocal Rank Fusion)
     RRF_K = 60
@@ -466,35 +479,29 @@ Answer:"""
 
 def list_documents(user_id):
     """List the names of the PDFs this user has uploaded, the newest first."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT source_file FROM document_chunks WHERE user_id = %s "
-        "GROUP BY source_file ORDER BY MAX(id) DESC;",
-        (user_id,),
-    )
-    results = cur.fetchall()
-    cur.close()
-    conn.close()
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT source_file FROM document_chunks WHERE user_id = %s "
+            "GROUP BY source_file ORDER BY MAX(id) DESC;",
+            (user_id,),
+        )
+        results = cur.fetchall()
     return [row[0] for row in results]
 
 
 def get_document_chunks_in_order(source_file, user_id, limit=25):
     """Fetch chunks in original document order, for summarization (not similarity-based)."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT chunk_text FROM document_chunks
-        WHERE source_file = %s AND user_id = %s
-        ORDER BY id ASC
-        LIMIT %s
-        """,
-        (source_file, user_id, limit)
-    )
-    results = cur.fetchall()
-    cur.close()
-    conn.close()
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT chunk_text FROM document_chunks
+            WHERE source_file = %s AND user_id = %s
+            ORDER BY id ASC
+            LIMIT %s
+            """,
+            (source_file, user_id, limit)
+        )
+        results = cur.fetchall()
     return [row[0] for row in results]
 
 
@@ -1275,12 +1282,9 @@ def _page_numbers(chunk_ids):
     ids = list({i for i in chunk_ids if i is not None})
     if not ids:
         return {}
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT id, page_number FROM document_chunks WHERE id = ANY(%s) AND page_number IS NOT NULL", (ids,))
-    found = {row[0]: row[1] for row in cur.fetchall()}
-    cur.close()
-    conn.close()
+    with db_cursor() as cur:
+        cur.execute("SELECT id, page_number FROM document_chunks WHERE id = ANY(%s) AND page_number IS NOT NULL", (ids,))
+        found = {row[0]: row[1] for row in cur.fetchall()}
     return found
 
 
@@ -1504,14 +1508,11 @@ def add_following_chunks(results, user_id, max_total=10):
     wanted = sorted({r[0] + 1 for r in results} - have)
     if not wanted:
         return results
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, source_file, chunk_text FROM document_chunks WHERE id = ANY(%s) AND user_id = %s",
-        (wanted, user_id))
-    extra = [(i, src, text, 1.0) for (i, src, text) in cur.fetchall() if src == results[0][1]]
-    cur.close()
-    conn.close()
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id, source_file, chunk_text FROM document_chunks WHERE id = ANY(%s) AND user_id = %s",
+            (wanted, user_id))
+        extra = [(i, src, text, 1.0) for (i, src, text) in cur.fetchall() if src == results[0][1]]
     combined = sorted(list(results) + extra, key=lambda r: r[0])
     return combined if len(combined) <= max_total else list(results)
 
