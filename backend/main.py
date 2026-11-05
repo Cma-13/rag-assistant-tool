@@ -71,47 +71,49 @@ MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_BYTES = 72  # bcrypt only uses the first 72 bytes of a password
 
 
+EMAIL_ERROR = "Please enter a valid email address."
+
+
 def email_problem(email):
     """Why this (already trimmed and lower-cased) email cannot be used to sign up, or None
     when it is fine. The sign-up form in the browser checks the same rules."""
-    example = "like name@example.com"
     if not email:
-        return f"Please enter your email, {example}."
+        return EMAIL_ERROR
     if re.search(r"\s", email):
-        return "An email can't contain spaces."
+        return EMAIL_ERROR
     if len(email) > 254:
-        return "This email is too long (the limit is 254 characters)."
+        return EMAIL_ERROR
     parts = email.split("@")
     if len(parts) < 2:
-        return f"Your email needs an @ sign, {example}."
+        return EMAIL_ERROR
     if len(parts) > 2:
-        return "An email can only have one @ sign."
+        return EMAIL_ERROR
     local, domain = parts
     if not local:
-        return f"Please type something before the @, {example}."
+        return EMAIL_ERROR
     if len(local) > 64:
-        return "The part before the @ is too long (the limit is 64 characters)."
+        return EMAIL_ERROR
     if not re.fullmatch(r"[a-z0-9._%+-]+", local):
-        return "Before the @, use only letters, numbers and . _ % + -"
+        return EMAIL_ERROR
     if local.startswith(".") or local.endswith("."):
-        return "The part before the @ can't start or end with a dot."
+        return EMAIL_ERROR
     if ".." in local:
-        return "The part before the @ can't have two dots in a row."
+        return EMAIL_ERROR
     if len(domain) < 3:
-        return f"Please type your email provider after the @, {example}."
+        return EMAIL_ERROR
     if len(domain) > 255:
-        return "The part after the @ is too long."
+        return EMAIL_ERROR
     if not re.fullmatch(r"[a-z0-9.-]+", domain):
-        return "After the @, use only letters, numbers, hyphens and dots."
+        return EMAIL_ERROR
     labels = domain.split(".")
     if len(labels) < 2:
-        return "The part after @ should look like example.com."
+        return EMAIL_ERROR
     if any(label == "" or len(label) > 63 for label in labels):
-        return "The part after @ should look like example.com."
+        return EMAIL_ERROR
     if any(label.startswith("-") or label.endswith("-") for label in labels):
-        return "A part of the domain can't start or end with a hyphen."
+        return EMAIL_ERROR
     if not re.fullmatch(r"[a-z]{2,}", labels[-1]):
-        return "The ending (like .com) must be at least 2 letters."
+        return EMAIL_ERROR
     return None
 
 
