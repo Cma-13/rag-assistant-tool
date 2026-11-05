@@ -11,33 +11,34 @@ const GOOGLE_CLIENT_ID =
 
 // The rules an email must follow to sign up (the server checks the same rules).
 // The text is trimmed and lower-cased first, then it must pass all of these.
+const EMAIL_ERROR = "Please enter a valid email address.";
+
 function emailProblem(raw: string): string | null {
   const email = raw.trim().toLowerCase();
-  const example = "like name@example.com";
-  if (!email) return `Please enter your email, ${example}.`;
-  if (/\s/.test(email)) return "An email can't contain spaces.";
-  if (email.length > 254) return "This email is too long (the limit is 254 characters).";
+  if (!email) return EMAIL_ERROR;
+  if (/\s/.test(email)) return EMAIL_ERROR;
+  if (email.length > 254) return EMAIL_ERROR;
   const at = email.split("@");
-  if (at.length < 2) return `Your email needs an @ sign, ${example}.`;
-  if (at.length > 2) return "An email can only have one @ sign.";
+  if (at.length < 2) return EMAIL_ERROR;
+  if (at.length > 2) return EMAIL_ERROR;
   const [local, domain] = at;
-  if (!local) return `Please type something before the @, ${example}.`;
-  if (local.length > 64) return "The part before the @ is too long (the limit is 64 characters).";
+  if (!local) return EMAIL_ERROR;
+  if (local.length > 64) return EMAIL_ERROR;
   if (!/^[a-z0-9._%+-]+$/.test(local)) {
-    return "Before the @, use only letters, numbers and . _ % + -";
+    return EMAIL_ERROR;
   }
-  if (local.startsWith(".") || local.endsWith(".")) return "The part before the @ can't start or end with a dot.";
-  if (local.includes("..")) return "The part before the @ can't have two dots in a row.";
-  if (!domain || domain.length < 3) return `Please type your email provider after the @, ${example}.`;
-  if (domain.length > 255) return "The part after the @ is too long.";
-  if (!/^[a-z0-9.-]+$/.test(domain)) return "After the @, use only letters, numbers, hyphens and dots.";
+  if (local.startsWith(".") || local.endsWith(".")) return EMAIL_ERROR;
+  if (local.includes("..")) return EMAIL_ERROR;
+  if (!domain || domain.length < 3) return EMAIL_ERROR;
+  if (domain.length > 255) return EMAIL_ERROR;
+  if (!/^[a-z0-9.-]+$/.test(domain)) return EMAIL_ERROR;
   const labels = domain.split(".");
-  if (labels.length < 2) return "The part after @ should look like example.com.";
-  if (labels.some((l) => l === "" || l.length > 63)) return "The part after @ should look like example.com.";
+  if (labels.length < 2) return EMAIL_ERROR;
+  if (labels.some((l) => l === "" || l.length > 63)) return EMAIL_ERROR;
   if (labels.some((l) => l.startsWith("-") || l.endsWith("-"))) {
-    return "A part of the domain can't start or end with a hyphen.";
+    return EMAIL_ERROR;
   }
-  if (!/^[a-z]{2,}$/.test(labels[labels.length - 1])) return "The ending (like .com) must be at least 2 letters.";
+  if (!/^[a-z]{2,}$/.test(labels[labels.length - 1])) return EMAIL_ERROR;
   return null;
 }
 
