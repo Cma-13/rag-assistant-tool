@@ -153,16 +153,16 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
-      <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#1C1C1E]/35 px-4 backdrop-blur-[2px]">
+      <div className="w-full max-w-sm rounded-3xl border border-[#E6E0D2] bg-white p-7 shadow-2xl">
         <div className="mb-5 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-[#1C1C1E]">
+          <h2 className="text-xl font-semibold tracking-tight text-[#1C1C1E]">
             {mode === "login" ? "Log in" : "Create an account"}
           </h2>
           <button
             type="button"
             onClick={onClose}
-            className="text-[#9A968C] hover:text-[#1C1C1E]"
+            className="flex h-8 w-8 items-center justify-center rounded-full text-[#9A968C] transition hover:bg-[#F7F5F0] hover:text-[#1C1C1E]"
             aria-label="Close"
           >
             ✕
@@ -189,7 +189,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
                 setError("");
               }}
               onBlur={() => setEmailTouched(true)}
-              className={`w-full rounded-xl border px-3 py-2 text-[14.5px] outline-none focus:border-[#5E7C5C] ${
+              className={`w-full rounded-xl border px-3.5 py-2.5 text-[14.5px] outline-none transition focus:border-[#5E7C5C] focus:shadow-[0_0_0_4px_rgba(94,124,92,0.12)] ${
                 emailHint ? "border-red-400" : "border-[#E6E0D2]"
               }`}
             />
@@ -208,7 +208,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
                   setError("");
                 }}
                 onBlur={() => setPasswordTouched(true)}
-                className={`w-full rounded-xl border py-2 pl-3 pr-10 text-[14.5px] outline-none focus:border-[#5E7C5C] ${
+                className={`w-full rounded-xl border py-2.5 pl-3.5 pr-10 text-[14.5px] outline-none transition focus:border-[#5E7C5C] focus:shadow-[0_0_0_4px_rgba(94,124,92,0.12)] ${
                   passwordTooShort ? "border-red-400" : "border-[#E6E0D2]"
                 }`}
               />
@@ -234,7 +234,7 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
           <button
             type="submit"
             disabled={loading}
-            className="w-full rounded-xl bg-[#5E7C5C] py-2 text-[14.5px] font-medium text-white transition hover:bg-[#4E684C] disabled:opacity-50"
+            className="w-full rounded-xl bg-[#5E7C5C] py-2.5 text-[14.5px] font-medium text-white shadow-sm transition hover:bg-[#4E684C] disabled:opacity-50"
           >
             {loading
               ? "Please wait…"
