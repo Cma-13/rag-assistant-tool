@@ -98,3 +98,30 @@ body {
   color: transparent;
   animation: shimmerSweep 2.2s linear infinite;
 }
+
+/* Visible keyboard focus everywhere, without rings on mouse clicks */
+:where(button, a, [role="button"], input, textarea, select):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+::selection {
+  background: #DCE7D9;
+  color: #1C1C1E;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
