@@ -62,6 +62,30 @@ function EyeIcon({ off }: { off: boolean }) {
   );
 }
 
+function LogoMark() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M13 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4" />
+      <path d="M13 3l5 5v3" />
+      <path d="M13 3v4a1 1 0 0 0 1 1h4" />
+      <line x1="8.5" y1="9.5" x2="11" y2="9.5" />
+      <line x1="8.5" y1="13" x2="12" y2="13" />
+      <circle cx="16" cy="16.5" r="3" />
+      <line x1="18.2" y1="18.7" x2="20.5" y2="21" />
+    </svg>
+  );
+}
+
+function AlertIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="flex-shrink-0">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="8" x2="12" y2="12" />
+      <line x1="12" y1="16" x2="12.01" y2="16" />
+    </svg>
+  );
+}
+
 interface AuthModalProps {
   onClose: () => void;
   onAuthSuccess: (token: string, email: string) => void;
@@ -152,146 +176,221 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
     }
   };
 
+  const inputClass = (bad: boolean) =>
+    `w-full rounded-xl border bg-white px-3.5 py-2.5 text-[14.5px] text-[#1C1C1E] outline-none transition placeholder:text-[#B5B0A5] focus:shadow-[0_0_0_4px_rgba(94,124,92,0.12)] ${
+      bad ? "border-red-400 focus:border-red-400" : "border-[#E6E0D2] hover:border-[#D6CFBF] focus:border-[#5E7C5C]"
+    }`;
+
+  const switchMode = (next: "login" | "signup") => {
+    setMode(next);
+    setError("");
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#1C1C1E]/35 px-4 backdrop-blur-[2px]">
-      <div className="w-full max-w-sm rounded-3xl border border-[#E6E0D2] bg-white p-7 shadow-2xl">
-        <div className="mb-5 flex items-center justify-between">
-          <h2 className="text-xl font-semibold tracking-tight text-[#1C1C1E]">
-            {mode === "login" ? "Log in" : "Create an account"}
-          </h2>
+    <div className="auth-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#1C1C1E]/40 px-4 py-6 backdrop-blur-[3px]">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="auth-title"
+        className="auth-card relative flex max-h-full w-full max-w-[400px] overflow-hidden rounded-3xl bg-white shadow-2xl md:max-w-[840px]"
+      >
+        {/* Brand panel (wide screens only): what DocQuery does */}
+        <aside className="relative hidden w-[42%] flex-col justify-between overflow-hidden bg-[#5E7C5C] p-8 text-[#FEFAF3] md:flex">
+          <div className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-white/[0.06]" />
+          <div className="pointer-events-none absolute -bottom-32 -left-20 h-72 w-72 rounded-full bg-black/[0.07]" />
+
+          <div className="relative flex items-center gap-2.5">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#FEFAF3] text-[#5E7C5C]">
+              <LogoMark />
+            </span>
+            <span className="text-[15px] font-semibold tracking-tight">DocQuery</span>
+          </div>
+
+          <div className="relative">
+            <p className="text-[26px] font-semibold leading-[1.2] tracking-tight">
+              Ask your PDFs.
+              <br />
+              Get answers with the page they came from.
+            </p>
+          </div>
+
+          <p className="relative text-[12.5px] leading-relaxed text-[#FEFAF3]/75">
+            Your documents stay private to your account.
+          </p>
+        </aside>
+
+        {/* Form side */}
+        <div className="flex-1 overflow-y-auto px-6 py-7 sm:px-10 sm:py-9">
           <button
             type="button"
             onClick={onClose}
-            className="flex h-8 w-8 items-center justify-center rounded-full text-[#9A968C] transition hover:bg-[#F7F5F0] hover:text-[#1C1C1E]"
+            className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full text-[#9A968C] transition hover:bg-[#F4F1EA] hover:text-[#1C1C1E]"
             aria-label="Close"
           >
-            ✕
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
           </button>
-        </div>
 
-        <form
-          className="space-y-3"
-          noValidate
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSubmit();
-          }}
-        >
-          <div>
-            <input
-              type="email"
-              name="email"
-              autoComplete="username"
-              placeholder="Email"
-              value={email}
-              onChange={(e) => {
-                setEmail(e.target.value);
-                setError("");
-              }}
-              onBlur={() => setEmailTouched(true)}
-              className={`w-full rounded-xl border px-3.5 py-2.5 text-[14.5px] outline-none transition focus:border-[#5E7C5C] focus:shadow-[0_0_0_4px_rgba(94,124,92,0.12)] ${
-                emailHint ? "border-red-400" : "border-[#E6E0D2]"
-              }`}
-            />
-            {emailHint && <p className="mt-1 text-[12.5px] text-red-600">{emailHint}</p>}
-          </div>
-          <div>
-            <div className="relative">
-              <input
-                type={showPassword ? "text" : "password"}
-                name="password"
-                autoComplete={mode === "login" ? "current-password" : "new-password"}
-                placeholder="Password"
-                value={password}
-                onChange={(e) => {
-                  setPassword(e.target.value);
-                  setError("");
-                }}
-                onBlur={() => setPasswordTouched(true)}
-                className={`w-full rounded-xl border py-2.5 pl-3.5 pr-10 text-[14.5px] outline-none transition focus:border-[#5E7C5C] focus:shadow-[0_0_0_4px_rgba(94,124,92,0.12)] ${
-                  passwordTooShort ? "border-red-400" : "border-[#E6E0D2]"
-                }`}
+          {/* Small logo for phones, where the brand panel is hidden */}
+          <span className="mb-5 flex h-10 w-10 items-center justify-center rounded-xl bg-[#5E7C5C] text-white md:hidden">
+            <LogoMark />
+          </span>
+
+          <h2 id="auth-title" className="text-[24px] font-semibold tracking-tight text-[#1C1C1E]">
+            {mode === "login" ? "Welcome back" : "Create your account"}
+          </h2>
+
+          <div className="mt-6 flex min-h-[44px] justify-center">
+            <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID} locale="en">
+              <GoogleLogin
+                onSuccess={(res) => handleGoogle(res.credential)}
+                onError={() => setError("Google sign-in failed. Please try again.")}
+                text={mode === "login" ? "continue_with" : "signup_with"}
+                shape="pill"
+                size="large"
+                width="300"
               />
-              <button
-                type="button"
-                onClick={() => setShowPassword((s) => !s)}
-                onMouseDown={(e) => e.preventDefault()} // keep the cursor in the password box
-                aria-label={showPassword ? "Hide password" : "Show password"}
-                title={showPassword ? "Hide password" : "Show password"}
-                className="absolute right-2 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-[#9A968C] hover:text-[#5E7C5C]"
-              >
-                <EyeIcon off={showPassword} />
-              </button>
-            </div>
-            {/* only shown when the password is too short */}
-            {passwordTooShort && (
-              <p className="mt-1 text-[12.5px] text-red-600">At least {MIN_PASSWORD_LENGTH} characters</p>
-            )}
+            </GoogleOAuthProvider>
           </div>
 
-          {error && <p className="text-[13px] text-red-600">{error}</p>}
+          <div className="my-5 flex items-center gap-3 text-[12px] text-[#9A968C]">
+            <span className="h-px flex-1 bg-[#ECE7DD]" />
+            or
+            <span className="h-px flex-1 bg-[#ECE7DD]" />
+          </div>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full rounded-xl bg-[#5E7C5C] py-2.5 text-[14.5px] font-medium text-white shadow-sm transition hover:bg-[#4E684C] disabled:opacity-50"
+          <form
+            className="space-y-4"
+            noValidate
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleSubmit();
+            }}
           >
-            {loading
-              ? "Please wait…"
-              : mode === "login"
-                ? "Log in"
-                : "Sign up"}
-          </button>
-        </form>
-
-        <div className="my-4 flex items-center gap-3 text-[12px] text-[#9A968C]">
-          <span className="h-px flex-1 bg-[#E0DBD3]" />
-          or
-          <span className="h-px flex-1 bg-[#E0DBD3]" />
-        </div>
-
-        <div className="flex justify-center">
-          <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID} locale="en">
-            <GoogleLogin
-              onSuccess={(res) => handleGoogle(res.credential)}
-              onError={() => setError("Google sign-in failed. Please try again.")}
-              text={mode === "login" ? "continue_with" : "signup_with"}
-              width="300"
-            />
-          </GoogleOAuthProvider>
-        </div>
-
-        <p className="mt-4 text-center text-[13px] text-[#6B6B6B]">
-          {mode === "login" ? (
-            <>
-              Don&apos;t have an account?{" "}
-              <button
-                type="button"
-                onClick={() => {
-                  setMode("signup");
+            <div>
+              <label htmlFor="auth-email" className="mb-1.5 block text-[13px] font-medium text-[#1C1C1E]">
+                Email
+              </label>
+              <input
+                id="auth-email"
+                type="email"
+                name="email"
+                autoComplete="username"
+                placeholder="you@example.com"
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
                   setError("");
                 }}
-                className="font-medium text-[#5E7C5C] hover:underline"
-              >
-                Sign up
-              </button>
-            </>
-          ) : (
-            <>
-              Already have an account?{" "}
-              <button
-                type="button"
-                onClick={() => {
-                  setMode("login");
-                  setError("");
-                }}
-                className="font-medium text-[#5E7C5C] hover:underline"
-              >
-                Log in
-              </button>
-            </>
-          )}
-        </p>
+                onBlur={() => setEmailTouched(true)}
+                aria-invalid={!!emailHint}
+                aria-describedby={emailHint ? "auth-email-error" : undefined}
+                className={inputClass(!!emailHint)}
+              />
+              {emailHint && (
+                <p id="auth-email-error" className="mt-1.5 flex items-center gap-1.5 text-[12.5px] text-red-600">
+                  <AlertIcon /> {emailHint}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label htmlFor="auth-password" className="mb-1.5 block text-[13px] font-medium text-[#1C1C1E]">
+                Password
+              </label>
+              <div className="relative">
+                <input
+                  id="auth-password"
+                  type={showPassword ? "text" : "password"}
+                  name="password"
+                  autoComplete={mode === "login" ? "current-password" : "new-password"}
+                  placeholder={mode === "login" ? "Your password" : "Create a password"}
+                  value={password}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    setError("");
+                  }}
+                  onBlur={() => setPasswordTouched(true)}
+                  aria-invalid={passwordTooShort}
+                  aria-describedby="auth-password-hint"
+                  className={`${inputClass(passwordTooShort)} pr-11`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((s) => !s)}
+                  onMouseDown={(e) => e.preventDefault()} // keep the cursor in the password box
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  title={showPassword ? "Hide password" : "Show password"}
+                  className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-[#9A968C] transition hover:bg-[#F4F1EA] hover:text-[#5E7C5C]"
+                >
+                  <EyeIcon off={showPassword} />
+                </button>
+              </div>
+              {/* Sign up shows the rule up front; it turns red only if the password is too short */}
+              {passwordTooShort ? (
+                <p id="auth-password-hint" className="mt-1.5 flex items-center gap-1.5 text-[12.5px] text-red-600">
+                  <AlertIcon /> At least {MIN_PASSWORD_LENGTH} characters
+                </p>
+              ) : signingUp ? (
+                <p id="auth-password-hint" className="mt-1.5 text-[12.5px] text-[#9A968C]">
+                  Use at least {MIN_PASSWORD_LENGTH} characters.
+                </p>
+              ) : null}
+            </div>
+
+            {error && (
+              <div role="alert" className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-[13px] text-red-700">
+                <span className="mt-px"><AlertIcon /></span>
+                {error}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#5E7C5C] py-3 text-[14.5px] font-semibold text-white shadow-sm transition hover:bg-[#4E684C] active:scale-[0.99] disabled:cursor-wait disabled:opacity-70"
+            >
+              {loading && (
+                <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.3" strokeWidth="3" />
+                  <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+                </svg>
+              )}
+              {loading
+                ? mode === "login"
+                  ? "Logging in…"
+                  : "Creating account…"
+                : mode === "login"
+                  ? "Log in"
+                  : "Create account"}
+            </button>
+          </form>
+
+          <p className="mt-6 text-center text-[13.5px] text-[#6B6B6B]">
+            {mode === "login" ? (
+              <>
+                New to DocQuery?{" "}
+                <button
+                  type="button"
+                  onClick={() => switchMode("signup")}
+                  className="font-semibold text-[#5E7C5C] underline-offset-4 hover:underline"
+                >
+                  Create an account
+                </button>
+              </>
+            ) : (
+              <>
+                Already have an account?{" "}
+                <button
+                  type="button"
+                  onClick={() => switchMode("login")}
+                  className="font-semibold text-[#5E7C5C] underline-offset-4 hover:underline"
+                >
+                  Log in
+                </button>
+              </>
+            )}
+          </p>
+        </div>
       </div>
     </div>
   );
