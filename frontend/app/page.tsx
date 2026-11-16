@@ -1112,9 +1112,6 @@ export default function Home() {
             <h1 className="text-[15px] font-semibold tracking-tight text-[#1C1C1E] leading-tight">
               DocQuery
             </h1>
-            <p className="hidden text-[11.5px] leading-tight text-[#9A968C] sm:block">
-              Answers from your own PDFs
-            </p>
           </div>
         </div>
 
@@ -1289,21 +1286,6 @@ export default function Home() {
                 <p className="mt-2 max-w-md text-[14.5px] leading-relaxed text-[#6B6B6B]">
                   Add a PDF, ask in your own words, and every answer points to the page it came from.
                 </p>
-                <ol className="mt-10 grid w-full max-w-2xl gap-3 text-left sm:grid-cols-3">
-                  {[
-                    ["Add a PDF", "Use the + button or drop files anywhere. Scanned pages work too."],
-                    ["Ask a question", "Facts, summaries, tables or follow-ups, across one or many files."],
-                    ["Check the source", "Click a source under an answer to open the PDF at that page."],
-                  ].map(([title, text], i) => (
-                    <li key={title} className="rounded-2xl border border-[#E6E0D2] bg-white/70 px-4 py-3.5">
-                      <span className="mb-2 flex h-6 w-6 items-center justify-center rounded-full bg-[#F6E2E9] text-[12px] font-semibold text-[#8A4F66]">
-                        {i + 1}
-                      </span>
-                      <p className="text-[13.5px] font-semibold text-[#1C1C1E]">{title}</p>
-                      <p className="mt-0.5 text-[12.5px] leading-relaxed text-[#6B6B6B]">{text}</p>
-                    </li>
-                  ))}
-                </ol>
               </div>
             )}
 
