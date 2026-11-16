@@ -173,8 +173,8 @@ function TableView({ table }: { table: StructuredTable }) {
         </div>
       </div>
 
-      <div className="max-h-[420px] overflow-auto rounded-lg border border-[#E0DBD3]">
-        <table className="w-auto min-w-[55%] table-auto border-collapse text-[12.5px]">
+      <div className="inline-block max-h-[420px] max-w-full overflow-auto rounded-xl border border-[#E0DBD3] align-top">
+        <table className="w-auto table-auto border-collapse text-[12.5px]">
           <thead className="sticky top-0 bg-[#EEF4EC] text-[#5E7C5C]">
             <tr>
               {table.columns.map((col, c) => (
@@ -228,7 +228,7 @@ function TableView({ table }: { table: StructuredTable }) {
 
 function PairsView({ pairs }: { pairs: { key: string; value: string }[] }) {
   return (
-    <div className="overflow-hidden rounded-lg border border-[#E0DBD3]">
+    <div className="overflow-hidden rounded-xl border border-[#E0DBD3]">
       <table className="w-full border-collapse text-[13px]">
         <tbody>
           {pairs.map((p, i) => (
@@ -378,11 +378,13 @@ function BotIcon() {
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-      <line x1="12" y1="3" x2="12" y2="7" />
-      <circle cx="8.5" cy="16" r="1" fill="currentColor" />
-      <circle cx="15.5" cy="16" r="1" fill="currentColor" />
+      <path d="M13 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4" />
+      <path d="M13 3v4a1 1 0 0 0 1 1h4" />
+      <path d="M13 3l5 5v3" />
+      <line x1="8.5" y1="9.5" x2="11" y2="9.5" />
+      <line x1="8.5" y1="13" x2="12" y2="13" />
+      <circle cx="16" cy="16.5" r="3" />
+      <line x1="18.2" y1="18.7" x2="20.5" y2="21" />
     </svg>
   );
 }
@@ -1100,16 +1102,19 @@ export default function Home() {
       )}
 
       {/* ── Top bar ───────────────────────────────── */}
-      <header className="flex items-center justify-between gap-4 border-b border-[#E6E0D2] bg-[#FEFAF3] px-6 py-3.5">
+      <header className="flex items-center justify-between gap-3 border-b border-[#E6E0D2] bg-[#FEFAF3]/95 px-4 py-3 backdrop-blur sm:gap-4 sm:px-6">
         {/* Brand */}
         <div className="flex items-center gap-2.5 min-w-0">
-          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-[#5E7C5C] text-white shadow-sm">
+          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-[#5E7C5C] text-white shadow-sm [&_svg]:h-[18px] [&_svg]:w-[18px]">
             <BotIcon />
           </div>
           <div className="min-w-0">
-            <h1 className="text-sm font-semibold text-[#1C1C1E] leading-tight">
+            <h1 className="text-[15px] font-semibold tracking-tight text-[#1C1C1E] leading-tight">
               DocQuery
             </h1>
+            <p className="hidden text-[11.5px] leading-tight text-[#9A968C] sm:block">
+              Answers from your own PDFs
+            </p>
           </div>
         </div>
 
@@ -1125,22 +1130,34 @@ export default function Home() {
                 setShowUserMenu(false);
                 setConfirmDelete(null);
               }}
-              className="flex items-center gap-1.5 rounded-full border border-[#E6E0D2] bg-white px-3.5 py-1.5 text-xs font-medium text-[#6B6B6B] shadow-sm transition hover:border-[#B8CFB3] hover:bg-[#EEF4EC] hover:text-[#5E7C5C]"
+              aria-expanded={showDocs}
+              className="flex items-center gap-1.5 rounded-full border border-[#E6E0D2] bg-white px-3 py-1.5 text-xs font-medium text-[#6B6B6B] shadow-sm transition hover:border-[#B8CFB3] hover:text-[#5E7C5C]"
             >
-              <FileIcon /> My documents ({uploadedDocs.length})
+              <FileIcon />
+              <span className="hidden sm:inline">My documents</span>
+              <span className="rounded-full bg-[#EEF4EC] px-1.5 py-px text-[11px] font-semibold text-[#5E7C5C]">
+                {uploadedDocs.length}
+              </span>
             </button>
             {showDocs && (
-              <div className="absolute right-0 top-10 z-20 w-72 rounded-xl border border-[#E6E0D2] bg-white py-2 shadow-lg">
+              <div className="absolute right-0 top-11 z-20 w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-[#E6E0D2] bg-white shadow-xl">
+                <div className="flex items-baseline justify-between border-b border-[#EFEBE4] px-4 py-2.5">
+                  <p className="text-[13px] font-semibold text-[#1C1C1E]">Your documents</p>
+                  <p className="text-[11.5px] text-[#9A968C]">
+                    {uploadedDocs.length} {uploadedDocs.length === 1 ? "file" : "files"}
+                  </p>
+                </div>
+                <div className="py-1.5">
                 {uploadedDocs.length === 0 ? (
-                  <p className="px-3 py-2 text-[12.5px] text-[#9A968C]">
-                    No documents yet. Upload a PDF to get started.
+                  <p className="px-4 py-3 text-[12.5px] leading-relaxed text-[#9A968C]">
+                    No documents yet. Attach a PDF with the + button to add it here.
                   </p>
                 ) : (
                   <ul className="max-h-72 overflow-y-auto">
                     {uploadedDocs.map((doc) => (
                       <li
                         key={doc}
-                        className="flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-[#FBF0F3]"
+                        className="flex items-center justify-between gap-2 px-4 py-2 transition hover:bg-[#F7F5F0]"
                       >
                         <button
                           onClick={() => openDocument(doc)}
@@ -1184,6 +1201,7 @@ export default function Home() {
                     ))}
                   </ul>
                 )}
+                </div>
               </div>
             )}
           </div>
@@ -1197,14 +1215,17 @@ export default function Home() {
                 setShowDocs(false);
                 setConfirmDelete(null);
               }}
-              className="flex h-8 w-8 items-center justify-center rounded-full bg-[#5E7C5C] text-[13px] font-semibold text-white shadow-sm"
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-[#5E7C5C] text-[13px] font-semibold text-white shadow-sm ring-2 ring-white transition hover:bg-[#4E684C]"
               title={userEmail}
+              aria-label="Account menu"
+              aria-expanded={showUserMenu}
             >
               {userInitial}
             </button>
             {showUserMenu && (
-              <div className="absolute right-0 top-10 z-10 w-48 rounded-xl border border-[#E6E0D2] bg-white py-2 shadow-lg">
-                <p className="truncate px-3 pb-2 text-[12px] text-[#9A968C]">
+              <div className="absolute right-0 top-11 z-10 w-56 overflow-hidden rounded-2xl border border-[#E6E0D2] bg-white py-1.5 shadow-xl">
+                <p className="text-[11px] px-4 pt-1.5 text-[#9A968C]">Signed in as</p>
+                <p className="mb-1.5 truncate border-b border-[#EFEBE4] px-4 pb-2.5 text-[13px] font-medium text-[#1C1C1E]">
                   {userEmail}
                 </p>
                 <button
@@ -1212,7 +1233,7 @@ export default function Home() {
                     setShowUserMenu(false);
                     handleClearChat();
                   }}
-                  className="w-full px-3 py-1.5 text-left text-[13px] text-[#1C1C1E] hover:bg-[#FBF0F3]"
+                  className="w-full px-4 py-2 text-left text-[13px] text-[#1C1C1E] transition hover:bg-[#F7F5F0]"
                 >
                   Clear chat
                 </button>
@@ -1221,7 +1242,7 @@ export default function Home() {
                     setShowUserMenu(false);
                     handleLogout();
                   }}
-                  className="w-full px-3 py-1.5 text-left text-[13px] text-[#1C1C1E] hover:bg-[#FBF0F3]"
+                  className="w-full px-4 py-2 text-left text-[13px] text-[#1C1C1E] transition hover:bg-[#F7F5F0]"
                 >
                   Log out
                 </button>
@@ -1235,7 +1256,7 @@ export default function Home() {
                 setAuthMode("login");
                 setShowAuthModal(true);
               }}
-              className="rounded-xl border border-[#E6E0D2] px-3 py-1.5 text-[13px] font-medium text-[#1C1C1E] hover:bg-[#FBF0F3]"
+              className="rounded-full border border-[#E6E0D2] bg-white px-4 py-1.5 text-[13px] font-medium text-[#1C1C1E] transition hover:border-[#B8CFB3] hover:text-[#5E7C5C]"
             >
               Log in
             </button>
@@ -1244,7 +1265,7 @@ export default function Home() {
                 setAuthMode("signup");
                 setShowAuthModal(true);
               }}
-              className="rounded-xl bg-[#5E7C5C] px-3 py-1.5 text-[13px] font-medium text-white hover:bg-[#4E684C]"
+              className="rounded-full bg-[#5E7C5C] px-4 py-1.5 text-[13px] font-medium text-white shadow-sm transition hover:bg-[#4E684C]"
             >
               Sign up
             </button>
@@ -1254,30 +1275,35 @@ export default function Home() {
 
       {/* ── Messages ──────────────────────────────── */}
       <main className="flex flex-1 flex-col overflow-hidden">
-        <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
-          <div className="mx-auto max-w-3xl space-y-5">
+        <div className="flex-1 overflow-y-auto px-3 py-6 sm:px-4 md:px-8">
+          <div className="mx-auto max-w-3xl space-y-6">
             {/* Empty state */}
             {isEmpty && (
-              <div className="flex flex-col items-center justify-center py-20 text-center">
-                <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-[#EFD3DC] bg-[#F6E2E9] text-[#5E7C5C] shadow-sm">
+              <div className="flex flex-col items-center px-2 pt-10 text-center sm:pt-16">
+                <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-[#5E7C5C] text-white shadow-md [&_svg]:h-7 [&_svg]:w-7">
                   <BotIcon />
                 </div>
-                <h2 className="mb-1.5 text-base font-semibold text-[#1C1C1E]">
-                  What&apos;s on the agenda today?
+                <h2 className="text-[22px] font-semibold tracking-tight text-[#1C1C1E] sm:text-[26px]">
+                  Ask questions about your documents
                 </h2>
-                <p className="max-w-xs text-sm leading-relaxed text-[#9A968C]">
-                  Ask me anything, or attach a PDF with the + button to get started.
+                <p className="mt-2 max-w-md text-[14.5px] leading-relaxed text-[#6B6B6B]">
+                  Add a PDF, ask in your own words, and every answer points to the page it came from.
                 </p>
-                <div className="mt-7 flex flex-wrap justify-center gap-2">
-                  {["Context-aware answers", "PDF documents"].map((feat) => (
-                    <span
-                      key={feat}
-                      className="rounded-full border border-[#EFD3DC] bg-[#FBEFF3] px-3 py-1 text-xs text-[#8A4F66]"
-                    >
-                      {feat}
-                    </span>
+                <ol className="mt-10 grid w-full max-w-2xl gap-3 text-left sm:grid-cols-3">
+                  {[
+                    ["Add a PDF", "Use the + button or drop files anywhere. Scanned pages work too."],
+                    ["Ask a question", "Facts, summaries, tables or follow-ups, across one or many files."],
+                    ["Check the source", "Click a source under an answer to open the PDF at that page."],
+                  ].map(([title, text], i) => (
+                    <li key={title} className="rounded-2xl border border-[#E6E0D2] bg-white/70 px-4 py-3.5">
+                      <span className="mb-2 flex h-6 w-6 items-center justify-center rounded-full bg-[#F6E2E9] text-[12px] font-semibold text-[#8A4F66]">
+                        {i + 1}
+                      </span>
+                      <p className="text-[13.5px] font-semibold text-[#1C1C1E]">{title}</p>
+                      <p className="mt-0.5 text-[12.5px] leading-relaxed text-[#6B6B6B]">{text}</p>
+                    </li>
                   ))}
-                </div>
+                </ol>
               </div>
             )}
 
@@ -1361,7 +1387,7 @@ export default function Home() {
                           <span className="block truncate text-[13px] font-medium text-[#1C1C1E]">
                             {name}
                           </span>
-                          <span className="block text-[11px] text-[#9A968C]">PDF</span>
+                          <span className="block text-[11px] text-[#9A968C]">Attached · click to open</span>
                         </span>
                       </button>
                     ))}
@@ -1375,10 +1401,10 @@ export default function Home() {
                     msg.structured || parseBlocks(msg.content).some((b) => b.kind === "table")
                       ? "w-full min-w-0 max-w-full"
                       : "max-w-[80%]"
-                  } rounded-2xl px-4 py-3 text-[14.5px] leading-relaxed shadow-sm ${
+                  } rounded-2xl px-4 py-3 text-[14.5px] leading-[1.65] shadow-sm ${
                     msg.role === "user"
                       ? "rounded-br-sm bg-[#5E7C5C] text-white"
-                      : "rounded-bl-sm border border-[#E0DBD3] bg-white text-[#1C1C1E]"
+                      : "rounded-bl-sm border border-[#E9E4DA] bg-white text-[#1C1C1E]"
                   }`}
                 >
                   {msg.structured ? (
@@ -1390,7 +1416,7 @@ export default function Home() {
                   {/* Which document(s) the answer came from */}
                   {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (
                     <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-[#EFEBE4] pt-2">
-                      <span className="text-[11px] text-[#9A968C]">Sources:</span>
+                      <span className="text-[11px] font-medium text-[#9A968C]">Sources</span>
                       {msg.sources.map((src) => {
                         const pages =
                           msg.sourceRefs?.find((r) => r.file === src)?.pages ?? [];
@@ -1455,14 +1481,10 @@ export default function Home() {
         </div>
 
         {/* ── Input bar ─────────────────────────────── */}
-        <div className="border-t border-[#E6E0D2] bg-[#FEFAF3] px-4 py-4 md:px-8">
+        <div className="border-t border-[#E6E0D2] bg-[#FEFAF3] px-3 pb-3 pt-3 sm:px-4 sm:pb-4 md:px-8">
           <div className="mx-auto max-w-3xl">
             <div
-              className={`rounded-2xl border bg-white px-4 py-2 shadow-sm transition-all duration-150 ${
-                uploadedDocs.length > 0 || attachments.length > 0
-                  ? "border-[#E6E0D2] focus-within:border-[#5E7C5C] focus-within:shadow-[0_0_0_3px_rgba(45,106,106,0.10)]"
-                  : "border-[#E6E0D2] opacity-60"
-              }`}
+              className="rounded-2xl border border-[#E6E0D2] bg-white px-3 py-2 shadow-sm transition-all duration-150 focus-within:border-[#5E7C5C] focus-within:shadow-[0_0_0_4px_rgba(94,124,92,0.12)]"
             >
               {/* PDFs attached to the next question */}
               {attachments.length > 0 && (
@@ -1502,7 +1524,7 @@ export default function Home() {
                   // not logged in: open the login popup instead of the file picker
                   if (!requireLogin()) e.preventDefault();
                 }}
-                className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl text-[#6B6B6B] transition ${
+                className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl text-[#6B6B6B] transition ${
                   loading || attachments.length >= MAX_ATTACHMENTS
                     ? "cursor-not-allowed opacity-40"
                     : "cursor-pointer hover:bg-[#EEF4EC] hover:text-[#5E7C5C]"
@@ -1545,14 +1567,14 @@ export default function Home() {
                 onClick={handleSend}
                 disabled={loading || (!input.trim() && attachments.length === 0)}
                 aria-label="Send message"
-                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl bg-[#5E7C5C] text-white shadow-sm transition hover:bg-[#4E684C] active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
+                className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-[#5E7C5C] text-white shadow-sm transition hover:bg-[#4E684C] active:scale-95 disabled:cursor-not-allowed disabled:bg-[#C9D5C6] disabled:shadow-none"
               >
                 <SendIcon />
               </button>
               </div>
             </div>
             <p className="mt-2 text-center text-[11px] text-[#B8B3A8]">
-              Answers are based on your uploaded knowledge base.
+              Answers come only from your uploaded documents. Check the sources for important details.
             </p>
           </div>
         </div>
