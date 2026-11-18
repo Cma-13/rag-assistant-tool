@@ -4,6 +4,7 @@ import re
 import time
 from dotenv import load_dotenv
 from groq import RateLimitError, APIStatusError, APIConnectionError
+import answer_trace as tr
 
 load_dotenv()
 
@@ -19,12 +20,14 @@ if PROVIDER == "groq":
     _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 
-def _call_ollama(prompt, num_predict, temperature):
-    response = _ollama.generate(
-        model=OLLAMA_MODEL,
-        prompt=prompt,
-        options={"num_predict": num_predict, "temperature": temperature},
-    )
+def _call_ollama(prompt, num_predict, temperature, fallback=False):
+    with tr.timer() as t:
+        response = _ollama.generate(
+            model=OLLAMA_MODEL,
+            prompt=prompt,
+            options={"num_predict": num_predict, "temperature": temperature},
+        )
+    tr.llm_call("Ollama (local)", OLLAMA_MODEL, t.ms, fallback=fallback)
     return response["response"]
 
 
@@ -39,7 +42,9 @@ def _call_groq(prompt, num_predict, temperature):
     )
     if "gpt-oss" in GROQ_MODEL:
         kwargs["reasoning_effort"] = "low"
-    response = _groq_client.chat.completions.create(**kwargs)
+    with tr.timer() as t:
+        response = _groq_client.chat.completions.create(**kwargs)
+    tr.llm_call("Groq (cloud)", GROQ_MODEL, t.ms)
     return response.choices[0].message.content or ""
 
 
@@ -61,7 +66,7 @@ def generate(prompt, num_predict=200, temperature=0.1, prefer_local=False):
             return _call_groq(prompt, num_predict, temperature)
         except (RateLimitError, APIStatusError, APIConnectionError) as e:
             print(f"Groq unavailable ({type(e).__name__}), falling back to Ollama for this request.")
-            return _call_ollama(prompt, num_predict, temperature)
+            return _call_ollama(prompt, num_predict, temperature, fallback=True)
     else:
         return _call_ollama(prompt, num_predict, temperature)
 
@@ -75,7 +80,10 @@ def groq_chat(messages, tools=None, tool_choice="auto", temperature=0.1):
         kwargs["tool_choice"] = tool_choice
     if "gpt-oss" in GROQ_MODEL:
         kwargs["reasoning_effort"] = "low"
-    return _groq_client.chat.completions.create(**kwargs)
+    with tr.timer() as t:
+        response = _groq_client.chat.completions.create(**kwargs)
+    tr.llm_call("Groq (cloud)", GROQ_MODEL, t.ms)
+    return response
 
 
 def _parse_json(text):
@@ -132,7 +140,9 @@ def generate_json(prompt, schema, max_tokens=2000, temperature=0.0):
                 )
                 if "gpt-oss" in GROQ_MODEL:
                     kwargs["reasoning_effort"] = "low"
-                response = _groq_client.chat.completions.create(**kwargs)
+                with tr.timer() as t:
+                    response = _groq_client.chat.completions.create(**kwargs)
+                tr.llm_call("Groq (cloud)", GROQ_MODEL, t.ms)
                 return _parse_json(response.choices[0].message.content)
             except RateLimitError as e:
                 wait = _retry_seconds(e)
@@ -147,10 +157,12 @@ def generate_json(prompt, schema, max_tokens=2000, temperature=0.0):
                 print(f"Groq structured output failed ({type(e).__name__}: {e}), falling back to Ollama for this request.")
                 break
 
-    response = _ollama.generate(
-        model=OLLAMA_MODEL,
-        prompt=prompt + "\n\nRespond with JSON only.",
-        format="json",
-        options={"num_predict": max_tokens, "temperature": temperature},
-    )
+    with tr.timer() as t:
+        response = _ollama.generate(
+            model=OLLAMA_MODEL,
+            prompt=prompt + "\n\nRespond with JSON only.",
+            format="json",
+            options={"num_predict": max_tokens, "temperature": temperature},
+        )
+    tr.llm_call("Ollama (local)", OLLAMA_MODEL, t.ms, fallback=(PROVIDER == "groq"))
     return _parse_json(response["response"])
