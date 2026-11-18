@@ -550,21 +550,25 @@ def get_document_chunks_in_order(source_file, user_id, limit=25):
 
 
 @tr.purpose("Summarising the document")
-def generate_summary(source_file, user_id):
-    """Generate a broad summary using chunks spread across the document."""
+def generate_summary(source_file, user_id, detailed=False):
+    """Generate a broad summary using chunks spread across the document.
+    detailed=True ('tell me more' after a summary) gives a longer one."""
     chunks = get_document_chunks_in_order(source_file, user_id, limit=40)
     if not chunks:
         return "I don't have any content to summarize yet please upload a document first."
 
     context = "\n\n".join(chunks)[:18000]
-    prompt = f"""Summarize the following document content in 3-5 sentences, covering its main topics and purpose.
+    length = ("in two or three short paragraphs (about 8-12 sentences), going through it in order and "
+              "including the important names, numbers and details" if detailed
+              else "in 3-5 sentences, covering its main topics and purpose")
+    prompt = f"""Summarize the following document content {length}.
 Use only facts written in the text. Do not guess who people are or how they are related unless the text says so.
 
 Document content:
 {context}
 
 Summary:"""
-    return llm_generate(prompt, num_predict=300, temperature=0.2)
+    return llm_generate(prompt, num_predict=700 if detailed else 300, temperature=0.2)
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +685,42 @@ def _documents_named_in_query(query, docs):
     return named
 
 
+# Words that say nothing about WHICH document is meant.
+_NAME_FILLER = set("""the a an of my this that these those please summarize summarise summary give me show tell
+about what is are and or in on for to with from compare comparison between difference differences both
+doc docs document documents file files pdf pdfs scanned copy final new sample version""".split())
+
+
+def _plain(word):
+    return word[:-1] if len(word) > 3 and word.endswith("s") else word
+
+
+def _name_scores(query, docs):
+    """How well each file name matches the words the user typed.
+    '4_Scanned_Electricity_Bill.pdf' -> {electricity, bill}; 'summarize the electricity bill'
+    scores 2 for it. Generic words like 'bill' or 'invoice' count half."""
+    q = {_plain(w) for w in re.findall(r"[a-z]+", query.lower()) if len(w) >= 3 and w not in _NAME_FILLER}
+    scores = {}
+    for doc in docs:
+        words = {_plain(w) for w in re.findall(r"[a-z]+", os.path.splitext(doc)[0].lower())
+                 if len(w) >= 3 and w not in _NAME_FILLER}
+        score = sum(0.5 if w in _GENERIC_NAME_WORDS or w + "s" in _GENERIC_NAME_WORDS else 1.0 for w in words & q)
+        if score:
+            scores[doc] = score
+    return scores
+
+
+def _best_name_match(query, docs):
+    """The one file the user's words point to, or None when no file or several fit equally."""
+    scores = _name_scores(query, docs)
+    if not scores:
+        return None
+    ranked = sorted(scores, key=lambda d: -scores[d])
+    if len(ranked) == 1 or scores[ranked[0]] > scores[ranked[1]]:
+        return ranked[0]
+    return None
+
+
 _TABLE_WORDS = set("""show me give list display extract get put make as a an the table tables key details detail values
 value numbers number all of in into rows row columns column from this that document file pdf please can you""".split())
 
@@ -703,9 +743,15 @@ def _pick_documents_for_query(query, user_id, source_file, max_docs=3, recent_do
     if scope:
         return scope
 
-    named = _documents_named_in_query(query, list_documents(user_id))
+    all_docs = list_documents(user_id)
+    named = _documents_named_in_query(query, all_docs)
     if named:
         return named[:max_docs]
+    by_name = _best_name_match(query, all_docs)
+    if by_name:
+        tr.add_step("note", f"Matched the words in the question to {by_name}",
+                    {"method": "file name match", "scores": _name_scores(query, all_docs)})
+        return [by_name]
 
     results = retrieve_chunks(_table_topic(query), user_id, top_k=8)
     if not results:
@@ -922,7 +968,51 @@ _ABOUT_UPLOADS = re.compile(
 _SUMMARY_WORDS = re.compile(r"\b(summari[sz]e|summary|overview|gist)\b", re.IGNORECASE)
 
 
-def agent_decide_action(query):
+# "which documents mention / contain / talk about X?"
+_FIND_DOCS = re.compile(
+    r"\b(?:which|what|any|do\s+any|does\s+any|find|show)\b.*\b(?:documents?|files?|pdfs?)\b.*?"
+    r"\b(?:mentions?|mentioned|contains?|talks?\s+about|refers?\s+to|includes?|discuss(?:es)?|says?\s+about|"
+    r"(?:is|are)\s+about|have\s+(?:information|info|anything)\s+(?:on|about))\s+(.+)", re.IGNORECASE)
+
+
+def _mention_topic(query):
+    """The thing being looked for in 'which documents mention <thing>?'."""
+    m = _FIND_DOCS.search(query)
+    if not m:
+        return ""
+    topic = re.sub(r"^(?:about|the|a|an)\s+", "", m.group(1).strip(), flags=re.IGNORECASE)
+    return topic.strip(" ?.!\"'")
+
+
+def find_documents_mentioning(topic, user_id, scope=None):
+    """Documents that contain the words of `topic`, best first, with the pages.
+    Exact phrase first; if nothing has the exact phrase, every word must appear."""
+    scope_sql, params = "", []
+    if scope:
+        scope_sql, params = " AND source_file = ANY(%s)", [scope]
+    with db_cursor() as cur:
+        cur.execute(
+            f"""SELECT source_file, COUNT(*), ARRAY_AGG(DISTINCT page_number)
+                FROM document_chunks
+                WHERE user_id = %s AND chunk_text ILIKE %s{scope_sql}
+                GROUP BY source_file ORDER BY COUNT(*) DESC""",
+            [user_id, f"%{topic}%"] + params)
+        rows, how = cur.fetchall(), "exact phrase"
+        if not rows:
+            cur.execute(
+                f"""SELECT source_file, COUNT(*), ARRAY_AGG(DISTINCT page_number)
+                    FROM document_chunks
+                    WHERE user_id = %s AND to_tsvector('simple', chunk_text) @@ plainto_tsquery('simple', %s){scope_sql}
+                    GROUP BY source_file ORDER BY COUNT(*) DESC""",
+                [user_id, topic] + params)
+            rows, how = cur.fetchall(), "all words"
+    found = [{"file": doc, "chunks": n, "pages": sorted(p for p in pages if p)} for doc, n, pages in rows]
+    tr.add_step("retrieval_docs", f'Looked for documents that mention "{topic}"',
+                {"method": f"PostgreSQL text match ({how})", "documents": found})
+    return found
+
+
+def agent_decide_action(query, history=None):
     """Decide the action: LIST/SUMMARY/TABLE/CHAT via keyword rules first, CHAT vs SEARCH via LLM otherwise."""
     query_lower = query.lower()
 
@@ -936,6 +1026,10 @@ def agent_decide_action(query):
     if (_is_user_fact(query) or _ABOUT_CONVERSATION.search(query)
             or (_ABOUT_ME.search(query) and not _DOC_WORDS.search(query))):
         return "CHAT"
+
+    # "Which documents mention X?" asks which files contain something, not for the file list.
+    if _FIND_DOCS.search(query) and _mention_topic(query):
+        return "FIND_DOCS"
 
     list_keywords = ["what documents", "which documents", "what files", "which files",
                       "list documents", "list files", "documents have you", "documents do you"]
@@ -955,6 +1049,11 @@ def agent_decide_action(query):
 
     if _TABLE_REQUEST.search(query):
         return "TABLE"
+
+    # "explain it in simple words" / "tell me more" after an answer: a follow-up on the last
+    # answer, handled further on without asking the model what kind of message it is.
+    if history and _followup_kind(query, history):
+        return "SEARCH"
 
     prompt = f"""You are a router deciding whether a user's message needs the uploaded documents, or is just conversation.
 Respond with ONLY one word - no explanation, no punctuation.
@@ -1185,7 +1284,8 @@ def _doc_mentioned_loosely(query, docs):
 # "make it shorter", "in simple words", "as bullet points": change the FORM of the
 # previous answer. No new search is needed, only the previous answer is reworded.
 _REWORK = re.compile(
-    r"\b(shorter|shorten|briefer|brief(?:ly)?|simpler|simplify|simple\s+(?:words|terms|english|language)|"
+    r"\b(shorter|shorten|briefer|brief(?:ly)?|simpler|simplify|simply|"
+    r"(?:simple|easy|easier|plain|layman'?s?)\s+(?:words|terms|english|language|way)|"
     r"in\s+(?:one|a)\s+(?:sentence|line|word)|bullet(?:s|\s+points?)?|in\s+points|rephrase|reword|rewrite|"
     r"say\s+(?:that|it)\s+again|translate)\b", re.IGNORECASE)
 
@@ -1207,7 +1307,8 @@ _SHORT_FOLLOWUP = re.compile(
 # Words that can appear in a follow-up like "make it shorter" or "give me an example then".
 # If a message has any other word (a topic such as "RAG" or "the penalty clause"), it is a
 # new question and is never treated as a follow-up.
-_FOLLOWUP_VOCAB = set("""make it that this those these them its shorter shorten longer simpler simplify simple more detail
+_FOLLOWUP_VOCAB = set("""terms language way easy easier plain simply layman laymans understand understandable
+make it that this those these them its shorter shorten longer simpler simplify simple more detail
 details detailed in one a an the sentence line word words bullet bullets point points please can you could give me example
 for tell explain elaborate expand go on continue then now again rephrase reword rewrite translate into to nepali english hindi
 briefly brief short so also and just little bit i want need would like be use say put as with some another of your answer
@@ -1385,6 +1486,29 @@ SEARCH_TOOL = [{
 }]
 
 
+def _match_doc_name(name, docs):
+    """The model sometimes shortens a file name ('The_Thirty_Nin...') or drops '.pdf'.
+    Map what it wrote to a real document; None when nothing fits (search everything)."""
+    if not name:
+        return None
+    if name in docs:
+        return name
+    stem = re.sub(r"(\.\.\.|…)+$", "", name.strip()).lower()
+    stem = re.sub(r"\.pdf$", "", stem)
+    if not stem:
+        return None
+    starts = [d for d in docs if d.lower().startswith(stem)]
+    if len(starts) == 1:
+        return starts[0]
+    inside = [d for d in docs if stem in d.lower()]
+    if len(inside) == 1:
+        return inside[0]
+    return _best_name_match(stem.replace("_", " "), docs)
+
+
+_COMPARE = re.compile(r"\b(compare|comparison|difference|differences|differ|versus|vs\.?|contrast|both)\b", re.IGNORECASE)
+
+
 def agent_search_loop(query, user_id, history, max_steps=4, scope=None, notes=None, elaborate=False):
     """Agentic SEARCH: lets the model call search_documents more than once,
     e.g. once per document, so a question relevant to several documents
@@ -1425,8 +1549,39 @@ Rules you must follow:
     all_sources = []
     all_chunks = []  # (document, text) of everything the searches returned
     all_hits = []    # (chunk id, document, text), used to find page numbers
+
+    # "Compare the invoice and the electricity bill": every document the question names
+    # gets its own search, done here in code so none is skipped by the model.
+    compare_docs = []
+    if _COMPARE.search(query):
+        scores = _name_scores(query, docs)
+        compare_docs = sorted(scores, key=lambda d: -scores[d])[:4] if len(scores) >= 2 else []
+    searched_alone = set()
+
+    def search_each_named_document():
+        missing = [d for d in compare_docs if d not in searched_alone]
+        if not missing:
+            return
+        parts = []
+        for doc in missing:
+            tr.add_step("agent", f"Comparison question: the app also searched {doc} on its own",
+                        {"tool": "search_documents", "query": query, "source_file": doc})
+            results = add_following_chunks(retrieve_chunks(query, user_id, top_k=4, source_file=[doc]), user_id)
+            searched_alone.add(doc)
+            all_sources.extend(r[1] for r in results)
+            all_chunks.extend((r[1], r[2]) for r in results)
+            all_hits.extend((r[0], r[1], r[2]) for r in results)
+            parts.append(f"From {doc}:\n" + ("\n\n".join(r[2] for r in results) or "No relevant results found."))
+        messages.append({"role": "user", "content":
+                         "Extra search results, one search per document being compared (use them to answer):\n\n"
+                         + "\n\n".join(parts)})
+
     for step in range(max_steps):
-        choice = "required" if step == 0 else ("none" if step == max_steps - 1 else "auto")
+        if step == max_steps - 1:
+            # Last step: no more searching. Asking the model to answer while still offering
+            # the tool can fail on Groq, which used to throw away every search done so far.
+            return _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, step)
+        choice = "required" if step == 0 else "auto"
         try:
             with tr.purpose(f"Agent step {step + 1}: deciding what to do next"):
                 response = groq_chat(messages, tools=SEARCH_TOOL, tool_choice=choice)
@@ -1454,6 +1609,7 @@ Rules you must follow:
             snippet = "\n\n".join(f"[{r[1]}] {r[2]}" for r in results) or "No relevant results found."
             messages.append({"role": "assistant", "content": msg.content or ""})
             messages.append({"role": "user", "content": f"Search results for your reference (use these to answer, don't just repeat them):\n\n{snippet}"})
+            search_each_named_document()
             continue
 
         if not msg.tool_calls:
@@ -1474,10 +1630,13 @@ Rules you must follow:
         })
         for call in msg.tool_calls:
             args = json.loads(call.function.arguments)
-            tr.add_step("agent", f"Agent step {step + 1}: the model called search_documents",
-                        {"tool": "search_documents", "query": args.get("query", query),
-                         "source_file": args.get("source_file") or "all documents"})
-            wanted = args.get("source_file")
+            written = args.get("source_file")
+            wanted = _match_doc_name(written, docs)
+            detail = {"tool": "search_documents", "query": args.get("query", query),
+                      "source_file": wanted or "all documents"}
+            if written and written != wanted:
+                detail["model_wrote"] = written  # e.g. a shortened name that was corrected
+            tr.add_step("agent", f"Agent step {step + 1}: the model called search_documents", detail)
             if scope:
                 # never search outside the files the user picked
                 wanted = [wanted] if wanted in scope else scope
@@ -1498,11 +1657,42 @@ Rules you must follow:
                 "tool_call_id": call.id,
                 "content": snippet,
             })
+            if wanted in compare_docs:
+                searched_alone.add(wanted)
+        if step == 0:
+            search_each_named_document()
 
     return {
         "answer": "I wasn't able to fully resolve this after several searches — could you rephrase or narrow the question?",
         "sources": [],
         "action_taken": "AGENT_SEARCH_INCOMPLETE",
+    }
+
+
+def _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, step):
+    """Write the answer from every passage the searches found, without offering the
+    search tool again (a plain chat call, so the model can only answer)."""
+    unique = {}
+    for cid, doc, text in all_hits:
+        unique[cid] = (doc, text)
+    if not unique:
+        return {"answer": "I couldn't find that in your documents.", "sources": [], "action_taken": "AGENT_SEARCH"}
+    results = "\n\n".join(f"[{doc}] {text}" for doc, text in unique.values())
+    messages = [{"role": "system", "content": system_prompt}]
+    for turn in (history or [])[-2:]:
+        messages.append({"role": "user", "content": turn["question"]})
+        messages.append({"role": "assistant", "content": turn["answer"]})
+    messages.append({"role": "user", "content":
+                     f"{query}\n\nAnswer now using only these search results (no more searches):\n\n{results}"})
+    _trace_context(all_hits)
+    with tr.purpose(f"Agent step {step + 1}: writing the final answer from all searches"):
+        answer = groq_chat(messages).choices[0].message.content or ""
+    docs_used = _sources_used(answer, all_chunks)
+    return {
+        "answer": answer,
+        "sources": docs_used,
+        "source_refs": _source_refs(answer, all_hits, docs_used),
+        "action_taken": "AGENT_SEARCH",
     }
 
 
@@ -1569,9 +1759,17 @@ def _resolve_summary_doc(query, user_id, source_file, history=None):
     named = _documents_named_in_query(query, docs)
     if len(named) == 1:
         return named[0]
+    # A name in the question wins: "the electricity bill" -> 4_Scanned_Electricity_Bill.pdf,
+    # even when we were just talking about another document ("summarize the story").
+    by_name = _best_name_match(query, docs)
+    if by_name:
+        tr.add_step("note", f"Matched the words in the question to {by_name}",
+                    {"method": "file name match", "scores": _name_scores(query, docs)})
+        return by_name
     # "summarize this document" while talking about one document means that one
     recent = _recent_source_doc(history)
     if recent in docs and _DEICTIC.search(query):
+        tr.add_step("note", f"Used the document from the last answer: {recent}", {"method": "conversation"})
         return recent
     results = retrieve_chunks(query, user_id, top_k=8)
     if not results:
@@ -1623,7 +1821,11 @@ def add_following_chunks(results, user_id, max_total=10):
             (wanted, user_id))
         extra = [(i, src, text, 1.0) for (i, src, text) in cur.fetchall() if src == results[0][1]]
     combined = sorted(list(results) + extra, key=lambda r: r[0])
-    return combined if len(combined) <= max_total else list(results)
+    if len(combined) > max_total:
+        return list(results)
+    if extra:
+        tr.note_last(following_chunks_added=len(extra))
+    return combined
 
 
 def agent_query(query, user_id, source_file=None, history=None, user_messages=None, recent_uploads=None):
@@ -1650,7 +1852,7 @@ def _answer_query(query, user_id, source_file=None, history=None, user_messages=
     history = _trim_history(history)  # long answers cut short, so prompts stay small
     notes = extract_notes((user_messages or []) + [query])  # facts the user stated earlier in this chat
     before = tr.step_count()
-    action = agent_decide_action(query)
+    action = agent_decide_action(query, history)
     scope = _as_scope(source_file)  # files the user picked for this question (none = all documents)
     used_llm = any(s["kind"] == "llm" for s in tr.steps_since(before))
     tr.add_step("intent", f"Understood the request as {action}", {
@@ -1717,12 +1919,23 @@ def _answer_query(query, user_id, source_file=None, history=None, user_messages=
         earlier = [t["question"] for t in history
                    if len(t["question"].split()) >= 3
                    and _followup_kind(t["question"], [t]) is None
+                   and not (len(t["question"].split()) <= 8 and (_REWORK.search(t["question"]) or _ELABORATE.search(t["question"])))
                    and not _SHORT_FOLLOWUP.match(t["question"].strip().lower().strip("!.? "))]
         if earlier:
             wants_example = bool(re.search(r"example", query, re.IGNORECASE))
             # "an example" / "more detail" after a table makes no sense as another table, so the
             # search uses the table's topic (without the word "table") and asks for sentences.
             last_q = earlier[-1]
+            # "tell me more" after a summary of one document: a longer summary of that document
+            last_turn = next(t for t in reversed(history) if t["question"] == last_q)
+            summary_doc = (last_turn.get("sources") or [None])[0]
+            if (user_id is not None and len(last_turn.get("sources") or []) == 1 and not wants_example
+                    and summary_doc in list_documents(user_id)
+                    and (_SUMMARY_REQUEST.search(last_q) or _SUMMARY_WORDS.search(last_q))):
+                tr.add_step("note", f"Follow-up on a summary: writing a longer summary of {summary_doc}",
+                            {"earlier_question": last_q, "document": summary_doc})
+                return {"answer": generate_summary(summary_doc, user_id, detailed=True),
+                        "sources": [summary_doc], "action_taken": "SUMMARY"}
             query = _table_topic(last_q) if _TABLE_REQUEST.search(last_q) else last_q
             action = "SEARCH"  # search that question again
             elaborate = (_AN_EXAMPLE if wants_example else _MORE_DETAIL) + " Answer in plain sentences, not a table."
@@ -1754,6 +1967,18 @@ def _answer_query(query, user_id, source_file=None, history=None, user_messages=
             "sources": [],
             "action_taken": "AUTH_REQUIRED"
         }
+
+    if action == "FIND_DOCS":
+        topic = _mention_topic(query)
+        found = find_documents_mentioning(topic, user_id, scope)
+        if not found:
+            return {"answer": f"None of your documents mention \"{topic}\".", "sources": [], "action_taken": "FIND_DOCS"}
+        lines = [f"- {d['file']}" + (f" (page {', '.join(map(str, d['pages']))})" if d["pages"] else "") for d in found]
+        answer = (f"\"{topic}\" is mentioned in {len(found)} "
+                  f"{'document' if len(found) == 1 else 'documents'}:\n" + "\n".join(lines))
+        return {"answer": answer, "sources": [d["file"] for d in found],
+                "source_refs": [{"file": d["file"], "pages": d["pages"][:3]} for d in found],
+                "action_taken": "FIND_DOCS"}
 
     if action == "LIST":
         docs = list_documents(user_id)
@@ -1895,6 +2120,8 @@ def _answer_query(query, user_id, source_file=None, history=None, user_messages=
                 return agent_search_loop(query, user_id, history, scope=scope, notes=notes, elaborate=elaborate)
             except Exception as e:
                 print(f"Agent loop failed ({type(e).__name__}): {e}")
+                tr.add_step("note", "The agent loop failed, so a single direct search was used instead",
+                            {"error": f"{type(e).__name__}: {str(e)[:160]}"})
 
         results = retrieve_chunks(query, user_id, top_k=8, source_file=scope)
 
@@ -1909,20 +2136,27 @@ def _answer_query(query, user_id, source_file=None, history=None, user_messages=
         best_distance = min(row[3] for row in results)
         context = "\n\n".join([chunk_text for (_, _, chunk_text, _) in results])
 
-        STRONG_THRESHOLD = 0.25
-        WEAK_THRESHOLD = 0.45
+        # multilingual-e5 gives even unrelated text a similarity of about 0.75 (its scores sit
+        # between 0.7 and 1.0), so the similarity alone can only rule out clear misses. A
+        # strong match also needs a word from the question to appear in the passages.
+        best_similarity = 1 - float(best_distance)
+        STRONG_SIMILARITY = 0.80
+        MISS_SIMILARITY = 0.76
+        question_words = [w for w in _keyword_query(query).split(" | ") if len(w) > 3]
+        shares_a_word = any(w in context.lower() for w in question_words)
 
-        if best_distance <= STRONG_THRESHOLD:
+        if best_similarity >= STRONG_SIMILARITY and shares_a_word:
             is_relevant = True
-        elif best_distance >= WEAK_THRESHOLD:
+        elif best_similarity < MISS_SIMILARITY:
             is_relevant = False
         else:
             is_relevant = check_relevance(query, context)
 
         tr.add_step("note", "Relevance check", {
-            "best_similarity": round(1 - float(best_distance), 3),
+            "best_similarity": round(best_similarity, 3),
+            "question_word_in_passages": shares_a_word,
             "decision": "relevant" if is_relevant else "not relevant",
-            "rule": "similarity 0.75+ is relevant, 0.55 or less is not, in between the model decides"})
+            "rule": "0.80+ with a question word is relevant, below 0.76 is not, in between the model decides"})
         if not is_relevant:
             return {
                 "answer": "I don't know — this doesn't appear to be covered in the knowledge base.",
