@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import AuthModal from "./components/AuthModal";
+import AnswerTrace, { type Trace } from "./components/AnswerTrace";
 import { API_URL } from "./config";
 
 function isTokenExpired(token: string): boolean {
@@ -35,6 +36,7 @@ interface Message {
   structured?: Structured | null;
   sources?: string[];
   sourceRefs?: { file: string; pages: number[] }[];
+  trace?: Trace | null; // the steps taken to find this answer
   attachments?: string[]; // PDFs attached to this question (shown as file cards)
   reading?: string; // set while PDFs are still being read: this message is replaced when they are ready
   uploads?: UploadItem[]; // status cards for PDFs added without a question
@@ -682,6 +684,7 @@ export default function Home() {
           structured: data.structured?.results?.length ? data.structured : null,
           sources: Array.isArray(data.sources) ? data.sources : [],
           sourceRefs: Array.isArray(data.source_refs) ? data.source_refs : [],
+          trace: data.trace?.steps?.length ? data.trace : null,
         },
       ]);
     } catch {
@@ -1424,6 +1427,9 @@ export default function Home() {
                       })}
                     </div>
                   )}
+
+                  {/* The steps behind the answer: intent, searches, model calls */}
+                  {msg.role === "assistant" && msg.trace && <AnswerTrace trace={msg.trace} />}
                 </div>
                 )}
 
