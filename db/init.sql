@@ -22,6 +22,20 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_fts ON document_chunks
     USING GIN (to_tsvector('english', chunk_text));
 
+-- How each page of a document was read at upload (text layer or OCR); shown in the answer trace.
+-- The backend also creates this table itself if an older database does not have it.
+CREATE TABLE IF NOT EXISTS document_info (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_file TEXT NOT NULL,
+    pages INTEGER,
+    text_pages INTEGER[],
+    ocr_pages INTEGER[],
+    table_pages INTEGER[],
+    tables INTEGER,
+    created_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (user_id, source_file)
+);
+
 CREATE TABLE IF NOT EXISTS chat_history (
     user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     messages JSONB NOT NULL DEFAULT '[]',
