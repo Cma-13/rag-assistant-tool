@@ -15,7 +15,7 @@ interface Hit {
 }
 
 export interface TraceStep {
-  kind: "intent" | "rewrite" | "retrieval" | "agent" | "llm" | "context" | "document" | "note";
+  kind: "intent" | "rewrite" | "retrieval" | "retrieval_docs" | "agent" | "llm" | "context" | "document" | "note";
   title: string;
   detail?: Record<string, unknown>;
   ms?: number;
@@ -30,6 +30,7 @@ const KIND_LABEL: Record<TraceStep["kind"], string> = {
   intent: "Intent",
   rewrite: "Rewrite",
   retrieval: "Retrieval",
+  retrieval_docs: "Retrieval",
   agent: "Agent",
   llm: "Language model",
   context: "Context",
@@ -46,11 +47,19 @@ function where(hit: Hit) {
   return hit.page ? `${hit.document} · p. ${hit.page}` : hit.document;
 }
 
-// A thin bar showing how close a passage is in meaning (0 to 1)
-function SimilarityBar({ value }: { value: number }) {
-  const pct = Math.max(0, Math.min(1, value)) * 100;
+// e5 similarities always sit between about 0.7 and 1.0, so a raw bar would look
+// almost full for every passage. The bar is drawn relative to the best match in
+// this list (from a floor of 0.7), and the raw value is shown next to it.
+const E5_FLOOR = 0.7;
+
+function SimilarityBar({ value, best }: { value: number; best: number }) {
+  const span = Math.max(best - E5_FLOOR, 0.01);
+  const pct = Math.max(0, Math.min(1, (value - E5_FLOOR) / span)) * 100;
   return (
-    <span className="flex items-center gap-1.5" title={`Similarity ${value.toFixed(3)}`}>
+    <span
+      className="flex items-center gap-1.5"
+      title={`Cosine similarity ${value.toFixed(3)}. The bar compares it with the best match in this list.`}
+    >
       <span className="h-1.5 w-12 overflow-hidden rounded-full bg-[#ECE7DD]">
         <span className="block h-full rounded-full bg-[#5E7C5C]" style={{ width: `${pct}%` }} />
       </span>
@@ -61,6 +70,7 @@ function SimilarityBar({ value }: { value: number }) {
 
 function HitList({ hits, showFoundBy }: { hits: Hit[]; showFoundBy?: boolean }) {
   if (!hits.length) return <p className="text-[#9A968C]">Nothing matched.</p>;
+  const best = Math.max(...hits.map((h) => h.similarity));
   return (
     <ol className="space-y-1">
       {hits.map((h, i) => (
@@ -86,7 +96,7 @@ function HitList({ hits, showFoundBy }: { hits: Hit[]; showFoundBy?: boolean }) 
                   RRF {h.rrf.toFixed(4)}
                 </span>
               )}
-              <SimilarityBar value={h.similarity} />
+              <SimilarityBar value={h.similarity} best={best} />
             </span>
           </div>
           <p className="mt-0.5 line-clamp-2 text-[#6B6B6B]">{h.text}</p>
@@ -104,7 +114,17 @@ function KeyValues({ detail, skip = [] }: { detail: Record<string, unknown>; ski
         <div key={k} className="contents">
           <dt className="text-[#9A968C]">{k.replace(/_/g, " ")}</dt>
           <dd className="break-words text-[#1C1C1E]">
-            {Array.isArray(v) ? v.join(", ") : typeof v === "boolean" ? (v ? "yes" : "no") : String(v)}
+            {Array.isArray(v)
+              ? v.join(", ")
+              : typeof v === "boolean"
+                ? v
+                  ? "yes"
+                  : "no"
+                : v && typeof v === "object"
+                  ? Object.entries(v as Record<string, unknown>)
+                      .map(([name, value]) => `${name}: ${String(value)}`)
+                      .join(" · ")
+                  : String(v)}
           </dd>
         </div>
       ))}
@@ -157,6 +177,17 @@ function RetrievalDetail({ detail }: { detail: Record<string, unknown> }) {
             {merged.method}: passages found by both searches rank higher. Top {merged.kept} kept.
           </p>
           <HitList hits={merged.results} showFoundBy />
+          {typeof detail.following_chunks_added === "number" && (
+            <p className="text-[#6B6B6B]">
+              + {detail.following_chunks_added} following{" "}
+              {detail.following_chunks_added === 1 ? "chunk was" : "chunks were"} added, so a fact cut at a chunk
+              boundary is not lost.
+            </p>
+          )}
+          <p className="text-[11px] text-[#9A968C]">
+            Bars compare each passage with the best match. With this embedding model every passage scores about
+            0.7 or more, so only the order matters, not the number itself.
+          </p>
         </>
       )}
       {tab === "vector" && (
@@ -185,6 +216,27 @@ function StepDetail({ step }: { step: TraceStep }) {
   switch (step.kind) {
     case "retrieval":
       return <RetrievalDetail detail={d} />;
+    case "retrieval_docs": {
+      const docs = (d.documents as { file: string; chunks: number; pages: number[] }[]) ?? [];
+      return (
+        <div className="space-y-1 text-[#6B6B6B]">
+          <p>{String(d.method)}</p>
+          {docs.length ? (
+            <ul className="space-y-0.5">
+              {docs.map((doc) => (
+                <li key={doc.file}>
+                  <span className="text-[#1C1C1E]">{doc.file}</span> · {doc.chunks}{" "}
+                  {doc.chunks === 1 ? "chunk" : "chunks"}
+                  {doc.pages.length ? ` · page ${doc.pages.join(", ")}` : ""}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p>No document contains it.</p>
+          )}
+        </div>
+      );
+    }
     case "rewrite":
       return (
         <p className="text-[#6B6B6B]">
@@ -217,6 +269,9 @@ function StepDetail({ step }: { step: TraceStep }) {
           Tool <code className="rounded bg-[#F4F1EA] px-1 font-mono text-[11px]">{String(d.tool)}</code> with query{" "}
           <span className="text-[#1C1C1E]">&ldquo;{String(d.query)}&rdquo;</span> in{" "}
           <span className="text-[#1C1C1E]">{Array.isArray(d.source_file) ? d.source_file.join(", ") : String(d.source_file)}</span>
+          {d.model_wrote ? (
+            <span className="text-[#9A968C]"> (the model wrote &ldquo;{String(d.model_wrote)}&rdquo;, matched to the real file)</span>
+          ) : null}
         </p>
       );
     case "context":
@@ -276,7 +331,7 @@ export default function AnswerTrace({ trace }: { trace: Trace }) {
               <li key={i} className="relative">
                 <span
                   className={`absolute -left-5 top-[3px] flex h-[15px] w-[15px] items-center justify-center rounded-full border-2 bg-white ${
-                    step.kind === "retrieval" || step.kind === "agent"
+                    step.kind === "retrieval" || step.kind === "retrieval_docs" || step.kind === "agent"
                       ? "border-[#5E7C5C]"
                       : step.kind === "llm"
                         ? "border-[#C98AA2]"
