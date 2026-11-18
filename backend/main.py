@@ -437,6 +437,7 @@ def query_documents(request: QueryRequest, current_user: dict | None = Depends(g
         "source_refs": result.get("source_refs"),  # [{"file": ..., "pages": [3]}] for SEARCH answers, else null
         "action_taken": result["action_taken"],
         "structured": result.get("structured"),  # {"pairs": [...], "tables": [...], "note": "..."} for TABLE answers, else null
+        "trace": result.get("trace"),  # the steps taken to find the answer, shown under it in the app
     }
     
 @app.get("/documents")
