@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pipeline import ocr_pdf, chunk_text_with_pages, embed_chunks, store_chunks, retrieve_chunks, generate_answer, get_connection, db_cursor, list_documents
 from fastapi.middleware.cors import CORSMiddleware
-from pipeline import agent_query
+from pipeline import agent_query, save_document_info, forget_document_info
 from fastapi import Depends, HTTPException, Header
 from llm import LLMBusyError
 from auth import hash_password, verify_password, create_access_token, decode_access_token
@@ -281,7 +281,8 @@ def _read_pdf_in_background(job_id, saved_path, storage_filename, content_hash, 
     """Runs in its own thread: read the PDF, split it, embed it and store it."""
     try:
         with READ_SLOT:
-            text = ocr_pdf(saved_path)
+            page_stats = {}  # how each page was read (text layer or OCR), shown in the answer trace
+            text = ocr_pdf(saved_path, stats=page_stats)
             chunk_pairs = chunk_text_with_pages(text)
             if not chunk_pairs:
                 raise UploadReadError("No readable text was found in this PDF.")
@@ -289,6 +290,10 @@ def _read_pdf_in_background(job_id, saved_path, storage_filename, content_hash, 
             pages = [pg for _, pg in chunk_pairs]
             embeddings = embed_chunks(chunks)
             store_chunks(storage_filename, chunks, embeddings, content_hash, user_id, pages=pages)
+            try:
+                save_document_info(storage_filename, user_id, page_stats)
+            except Exception as e:  # the document is stored; only the trace details are missing
+                print(f"UPLOAD: could not save page details for '{storage_filename}' ({type(e).__name__}): {e}")
         with JOBS_LOCK:
             UPLOAD_JOBS[job_id].update(status="done", chunks=len(chunks))
     except Exception as e:
@@ -464,6 +469,10 @@ def delete_document(name: str, current_user: dict = Depends(get_current_user)):
 
     if deleted == 0:
         raise HTTPException(status_code=404, detail="Document not found.")
+    try:
+        forget_document_info(name, user_id)
+    except Exception as e:
+        print(f"DELETE: could not remove page details for '{name}' ({type(e).__name__}): {e}")
 
     # also remove the stored PDF (older documents have none)
     if row and row[0]:
