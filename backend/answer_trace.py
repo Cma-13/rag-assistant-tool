@@ -13,7 +13,7 @@ _purpose = contextvars.ContextVar("docquery_trace_purpose", default=None)
 
 def start():
     """Begin a new trace for this request."""
-    trace = {"steps": [], "started": time.perf_counter()}
+    trace = {"steps": [], "chunks": {}, "started": time.perf_counter()}
     _current.set(trace)
     return trace
 
@@ -57,6 +57,25 @@ def note_last(**fields):
     trace = _current.get()
     if trace and trace["steps"]:
         trace["steps"][-1].setdefault("detail", {}).update(fields)
+
+
+def remember_chunk(chunk_id, info):
+    """Keep one chunk's details (document, page, position, full text) once per trace;
+    steps refer to it by id, so the same text is not repeated in every step."""
+    trace = _current.get()
+    if trace is not None and chunk_id is not None:
+        trace["chunks"].setdefault(str(chunk_id), info)
+
+
+def chunk(chunk_id):
+    """The stored details of a chunk ({} when unknown)."""
+    trace = _current.get()
+    return trace["chunks"].get(str(chunk_id), {}) if trace else {}
+
+
+def known_chunk(chunk_id):
+    trace = _current.get()
+    return trace is not None and str(chunk_id) in trace["chunks"]
 
 
 def step_count():
@@ -141,4 +160,4 @@ def finish():
     if trace is None:
         return None
     total = (time.perf_counter() - trace["started"]) * 1000
-    return {"steps": trace["steps"], "total_ms": round(total)}
+    return {"steps": trace["steps"], "chunks": trace["chunks"], "total_ms": round(total)}
