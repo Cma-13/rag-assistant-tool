@@ -13,6 +13,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, Future
 from llm import generate as llm_generate, groq_chat, generate_json, LLMBusyError, PROVIDER as LLM_PROVIDER
 import pdfplumber
+import answer_trace as tr
 
 load_dotenv()
 
@@ -382,7 +383,8 @@ def retrieve_chunks(query, user_id, top_k=5, source_file=None, candidate_k=20):
     """Hybrid retrieval: semantic (vector) search + keyword (full-text) search,
     merged with Reciprocal Rank Fusion. Every returned row keeps its real
     vector distance, so the relevance thresholds in agent_query still work."""
-    query_embedding = model.encode(f"query: {query}").tolist()
+    with tr.timer() as t_embed:
+        query_embedding = model.encode(f"query: {query}").tolist()
     keyword_q = _keyword_query(query)
 
     scope_sql = "user_id = %s"
@@ -394,33 +396,35 @@ def retrieve_chunks(query, user_id, top_k=5, source_file=None, candidate_k=20):
 
     with db_cursor() as cur:
         # 1. Semantic candidates (by meaning)
-        cur.execute(
-            f"""
-            SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
-            FROM document_chunks
-            WHERE {scope_sql}
-            ORDER BY distance ASC
-            LIMIT %s
-            """,
-            [query_embedding] + scope_params + [candidate_k]
-        )
-        semantic = cur.fetchall()
-
-        # 2. Keyword candidates (by actual words)
-        keyword = []
-        if keyword_q:
+        with tr.timer() as t_vec:
             cur.execute(
                 f"""
                 SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
                 FROM document_chunks
                 WHERE {scope_sql}
-                  AND to_tsvector('english', chunk_text) @@ to_tsquery('english', %s)
-                ORDER BY ts_rank(to_tsvector('english', chunk_text), to_tsquery('english', %s)) DESC
+                ORDER BY distance ASC
                 LIMIT %s
                 """,
-                [query_embedding] + scope_params + [keyword_q, keyword_q, candidate_k]
+                [query_embedding] + scope_params + [candidate_k]
             )
-            keyword = cur.fetchall()
+            semantic = cur.fetchall()
+
+        # 2. Keyword candidates (by actual words)
+        keyword = []
+        with tr.timer() as t_kw:
+            if keyword_q:
+                cur.execute(
+                    f"""
+                    SELECT id, source_file, chunk_text, embedding <=> %s::vector AS distance
+                    FROM document_chunks
+                    WHERE {scope_sql}
+                      AND to_tsvector('english', chunk_text) @@ to_tsquery('english', %s)
+                    ORDER BY ts_rank(to_tsvector('english', chunk_text), to_tsquery('english', %s)) DESC
+                    LIMIT %s
+                    """,
+                    [query_embedding] + scope_params + [keyword_q, keyword_q, candidate_k]
+                )
+                keyword = cur.fetchall()
 
     # 3. Merge the two ranked lists (Reciprocal Rank Fusion)
     RRF_K = 60
@@ -434,7 +438,46 @@ def retrieve_chunks(query, user_id, top_k=5, source_file=None, candidate_k=20):
         rows[row[0]] = row
 
     best_ids = sorted(scores, key=scores.get, reverse=True)[:top_k]
+    if tr.active():
+        _trace_retrieval(query, keyword_q, scope, semantic, keyword, best_ids, scores, user_id,
+                         t_embed.ms, t_vec.ms, t_kw.ms)
     return [rows[i] for i in best_ids]
+
+
+def _trace_retrieval(query, keyword_q, scope, semantic, keyword, best_ids, scores, user_id,
+                     embed_ms, vector_ms, keyword_ms, show=5):
+    """Add one 'retrieval' step showing what each search method found."""
+    ids = {r[0] for r in semantic[:show]} | {r[0] for r in keyword[:show]} | set(best_ids)
+    pages = {}
+    if ids:
+        with db_cursor() as cur:
+            cur.execute("SELECT id, page_number FROM document_chunks WHERE id = ANY(%s) AND user_id = %s",
+                        (list(ids), user_id))
+            pages = dict(cur.fetchall())
+    in_vec = {r[0]: rank + 1 for rank, r in enumerate(semantic)}
+    in_kw = {r[0]: rank + 1 for rank, r in enumerate(keyword)}
+    by_id = {r[0]: r for r in list(semantic) + list(keyword)}
+
+    def hit(r):
+        return {"document": r[1], "page": pages.get(r[0]), "similarity": round(1 - float(r[3]), 3),
+                "text": " ".join(r[2].split())[:140]}
+
+    merged = []
+    for cid in best_ids:
+        r = by_id[cid]
+        found_by = ("both" if cid in in_vec and cid in in_kw else "meaning" if cid in in_vec else "keywords")
+        merged.append({**hit(r), "rrf": round(scores[cid], 4), "found_by": found_by,
+                       "vector_rank": in_vec.get(cid), "keyword_rank": in_kw.get(cid)})
+    tr.add_step("retrieval", f'Searched for "{query}"', {
+        "scope": scope or "all documents",
+        "embedding": {"model": "multilingual-e5-base", "dimensions": 768, "ms": round(embed_ms)},
+        "vector": {"method": "pgvector cosine distance", "candidates": len(semantic), "ms": round(vector_ms),
+                   "top": [hit(r) for r in semantic[:show]]},
+        "keyword": {"method": "PostgreSQL full-text search (GIN index)", "query": keyword_q or "",
+                    "candidates": len(keyword), "ms": round(keyword_ms),
+                    "top": [hit(r) for r in keyword[:show]]},
+        "merged": {"method": "Reciprocal Rank Fusion (k = 60)", "kept": len(best_ids), "results": merged},
+    }, ms=embed_ms + vector_ms + keyword_ms)
 
 _MORE_DETAIL = ("The user wants a fuller answer than before: give a more detailed answer in several sentences, "
                 "covering every relevant detail in the context.")
@@ -442,6 +485,7 @@ _AN_EXAMPLE = ("The user wants an example: give one concrete example taken from 
                "in two or three sentences.")
 
 
+@tr.purpose("Writing the answer from the retrieved passages")
 def generate_answer(query, retrieved_chunks, elaborate=False):
     """Write the answer to a question using only the retrieved document passages."""
     # Group chunks by document (each document's chunks stay in original order)
@@ -505,6 +549,7 @@ def get_document_chunks_in_order(source_file, user_id, limit=25):
     return [row[0] for row in results]
 
 
+@tr.purpose("Summarising the document")
 def generate_summary(source_file, user_id):
     """Generate a broad summary using chunks spread across the document."""
     chunks = get_document_chunks_in_order(source_file, user_id, limit=40)
@@ -777,6 +822,7 @@ def _clean_structured(data):
     return {"pairs": pairs, "tables": tables, "note": str(data.get("note") or "").strip()}
 
 
+@tr.purpose("Extracting the table / key-value data")
 def extract_structured(query, document_text, columns_hint=None):
     """Ask the LLM to pull key-value pairs and/or tables out of the document,
     shaped by what the user asked for."""
@@ -926,7 +972,8 @@ Examples:
 Message: {query}
 
 Answer:"""
-    decision = llm_generate(prompt, num_predict=10, temperature=0.1).strip().upper()
+    with tr.purpose("Deciding the intent (CHAT or SEARCH)"):
+        decision = llm_generate(prompt, num_predict=10, temperature=0.1).strip().upper()
 
     if "CHAT" in decision:
         return "CHAT"
@@ -934,6 +981,7 @@ Answer:"""
         return "SEARCH"
 
 
+@tr.purpose("Checking the passages are relevant")
 def check_relevance(query, context):
     """Ask the LLM to verify if the context is relevant enough to attempt an answer."""
     prompt = f"""Does the context below contain information related to the question? Answer loosely - if there's any relevant connection, say YES.
@@ -977,6 +1025,7 @@ _FOLLOWUP_REQUESTS = re.compile(
     re.IGNORECASE)
 
 
+@tr.purpose("Rewriting the follow-up question")
 def rewrite_query(query, history):
     """Rewrite a follow-up into a standalone question using the most recent
     turns. Messages with no follow-up reference words are returned unchanged."""
@@ -1198,6 +1247,7 @@ def _rework_instruction(query):
     return f"Do what the user asks: {query}"
 
 
+@tr.purpose("Reworking the previous answer")
 def rework_answer(query, last_turn):
     """Re-write the previous answer the way the user asks (shorter, simpler, bullets...),
     using only what the previous answer already says."""
@@ -1378,7 +1428,8 @@ Rules you must follow:
     for step in range(max_steps):
         choice = "required" if step == 0 else ("none" if step == max_steps - 1 else "auto")
         try:
-            response = groq_chat(messages, tools=SEARCH_TOOL, tool_choice=choice)
+            with tr.purpose(f"Agent step {step + 1}: deciding what to do next"):
+                response = groq_chat(messages, tools=SEARCH_TOOL, tool_choice=choice)
             msg = response.choices[0].message
         except Exception as e:
             # Groq sometimes answers in text instead of calling the forced tool and then
@@ -1392,6 +1443,8 @@ Rules you must follow:
         # If it skipped the tool on step 0, force one direct unscoped search
         # ourselves rather than letting the model answer ungrounded.
         if step == 0 and not msg.tool_calls:
+            tr.add_step("agent", "The model did not call the search tool, so the app searched directly",
+                        {"tool": "search_documents", "query": query, "source_file": scope or "all documents"})
             results = retrieve_chunks(query, user_id, top_k=8, source_file=scope)
             results = add_following_chunks(results, user_id)
             all_sources.extend(r[1] for r in results)
@@ -1404,6 +1457,8 @@ Rules you must follow:
             continue
 
         if not msg.tool_calls:
+            tr.retitle_last("llm", f"Agent step {step + 1}: writing the final answer")
+            _trace_context(all_hits, after_answer=True)
             docs_used = _sources_used(msg.content or "", all_chunks)
             return {
                 "answer": msg.content,
@@ -1419,6 +1474,9 @@ Rules you must follow:
         })
         for call in msg.tool_calls:
             args = json.loads(call.function.arguments)
+            tr.add_step("agent", f"Agent step {step + 1}: the model called search_documents",
+                        {"tool": "search_documents", "query": args.get("query", query),
+                         "source_file": args.get("source_file") or "all documents"})
             wanted = args.get("source_file")
             if scope:
                 # never search outside the files the user picked
@@ -1446,6 +1504,56 @@ Rules you must follow:
         "sources": [],
         "action_taken": "AGENT_SEARCH_INCOMPLETE",
     }
+
+
+def _trace_context(hits, after_answer=False):
+    """Record what was handed to the language model to write the answer.
+    after_answer=True: the answer was already written (agent loop), so the step
+    goes just before that model call in the list."""
+    if not tr.active():
+        return
+    unique = {}
+    for cid, doc, text in hits:
+        unique[cid] = (doc, text)
+    chars = sum(len(text) for _, text in unique.values())
+    detail = {
+        "passages": len(unique),
+        "documents": sorted({doc for doc, _ in unique.values()}),
+        "characters": chars,
+        "approx_tokens": chars // 4,
+    }
+    if after_answer:
+        tr.add_step_before_last("llm", "context", "Passages given to the language model", detail)
+    else:
+        tr.add_step("context", "Passages given to the language model", detail)
+
+
+def _trace_documents(docs, user_id):
+    """Record how each source document was indexed when it was uploaded."""
+    if not tr.active() or not docs or user_id is None:
+        return
+    with db_cursor() as cur:
+        for doc in list(dict.fromkeys(docs))[:3]:
+            cur.execute(
+                """SELECT COUNT(*), COUNT(DISTINCT page_number), MAX(page_number),
+                          SUM(CASE WHEN chunk_text LIKE '%%[Table %%' THEN 1 ELSE 0 END),
+                          ROUND(AVG(LENGTH(chunk_text))), MIN(created_at)
+                   FROM document_chunks WHERE user_id = %s AND source_file = %s""",
+                (user_id, doc))
+            chunks, pages_with_text, last_page, table_chunks, avg_len, added = cur.fetchone()
+            if not chunks:
+                continue
+            tr.add_step("document", f"How {doc} was indexed", {
+                "pages": last_page,
+                "chunks": chunks,
+                "chunks_with_tables": table_chunks or 0,
+                "average_chunk_characters": int(avg_len or 0),
+                "chunking": "Heading-aware splitting, 500 characters with 50 overlap",
+                "text_reading": "PyMuPDF for text, pdfplumber for tables, Tesseract OCR for scanned pages",
+                "embedding": "multilingual-e5-base (768 numbers per chunk)",
+                "stored_in": "PostgreSQL + pgvector, with a GIN full-text index",
+                "added": added.strftime("%d %b %Y, %H:%M") if added else None,
+            })
 
 
 def _resolve_summary_doc(query, user_id, source_file, history=None):
@@ -1495,7 +1603,8 @@ Text:
 {text}
 
 Answer:"""
-        lines.append(f"- {doc}: " + llm_generate(prompt, num_predict=100, temperature=0.1).strip())
+        with tr.purpose(f"Describing {doc}"):
+            lines.append(f"- {doc}: " + llm_generate(prompt, num_predict=100, temperature=0.1).strip())
     return "\n".join(lines) if lines else "No documents have been uploaded yet."
 
 
@@ -1518,12 +1627,37 @@ def add_following_chunks(results, user_id, max_total=10):
 
 
 def agent_query(query, user_id, source_file=None, history=None, user_messages=None, recent_uploads=None):
+    """Answer a question and attach a trace: the steps taken to find the answer."""
+    tr.start()
+    try:
+        result = _answer_query(query, user_id, source_file, history, user_messages, recent_uploads)
+        intent = tr.first_step("intent")
+        final = result.get("action_taken", "")
+        if intent and not (final.startswith(intent["detail"]["action"])
+                           or (intent["detail"]["action"] == "SEARCH" and final.startswith("AGENT"))):
+            intent["detail"]["final_action"] = final
+        _trace_documents(result.get("sources") or [], user_id)
+        result["trace"] = tr.finish()
+        return result
+    finally:
+        if tr.active():
+            tr.finish()
+
+
+def _answer_query(query, user_id, source_file=None, history=None, user_messages=None, recent_uploads=None):
     """Entry point for every question: decides what kind of request it is (list documents, summarise, table or key-value extraction, chat, or document search) and answers it."""
     full_history = history or []
     history = _trim_history(history)  # long answers cut short, so prompts stay small
     notes = extract_notes((user_messages or []) + [query])  # facts the user stated earlier in this chat
+    before = tr.step_count()
     action = agent_decide_action(query)
     scope = _as_scope(source_file)  # files the user picked for this question (none = all documents)
+    used_llm = any(s["kind"] == "llm" for s in tr.steps_since(before))
+    tr.add_step("intent", f"Understood the request as {action}", {
+        "action": action,
+        "method": "LLM router" if used_llm else "keyword rules",
+        "selected_files": scope or "none (all documents)",
+    })
 
     # "Summarize these two documents I just gave you": the files added most recently.
     if not scope and recent_uploads and user_id is not None and _ABOUT_UPLOADS.search(query):
@@ -1607,7 +1741,11 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
     # (not when the question is about files attached to it: "what is this?" means that file,
     # and pulling in the topic of an earlier answer would search for the wrong thing)
     if action == "SEARCH" and not elaborate and not scope:
+        original = query
         query = rewrite_query(query, history)
+        if query != original:
+            tr.add_step("rewrite", "Rewrote the follow-up into a standalone question",
+                        {"from": original, "to": query})
 
 
     if action != "CHAT" and user_id is None:
@@ -1634,6 +1772,7 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
             docs = scope or list_documents(user_id)
             answer = f"{_ASK_WHICH} You have: " + ", ".join(docs) if docs else "No documents have been uploaded yet."
             return {"answer": answer, "sources": [], "action_taken": "SUMMARY"}
+        tr.add_step("note", f"Summarising {target}", {"document": target})
         return {"answer": generate_summary(target, user_id), "sources": [target], "action_taken": "SUMMARY"}
 
     elif action == "TABLE":
@@ -1663,6 +1802,9 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
                     print(f"TABLE: skipping '{doc}' (long, no tables, not named)")
                     continue
                 print(f"TABLE: using '{doc}' ({len(pieces)} piece(s), {sum(len(x) for x in pieces)} characters)")
+                tr.add_step("note", f"Reading {doc} for the table", {
+                    "document": doc, "pieces": len(pieces), "characters": sum(len(x) for x in pieces),
+                    "contains_tables": has_tables})
                 parts, failed, columns = [], 0, None
                 for piece in pieces:
                     try:
@@ -1728,21 +1870,23 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
     elif action == "CHAT":
         if _ABOUT_ASSISTANT.search(query):
             # A question about the assistant itself: answer from its background line.
-            answer = llm_generate(
-                f"{ASSISTANT_BACKGROUND}\nAnswer the question below briefly (1 to 3 sentences), only from the description above. "
-                f"Do not make up abilities.\n\nQuestion: {query}",
-                num_predict=150, prefer_local=(user_id is None))
+            with tr.purpose("Answering a question about the assistant"):
+                answer = llm_generate(
+                    f"{ASSISTANT_BACKGROUND}\nAnswer the question below briefly (1 to 3 sentences), only from the description above. "
+                    f"Do not make up abilities.\n\nQuestion: {query}",
+                    num_predict=150, prefer_local=(user_id is None))
         else:
             # Ordinary small talk: just chat, without bringing up PDFs. The earlier
             # conversation is included, so "what's my name?" can be answered.
             context = _chat_context(history, notes)
-            answer = llm_generate(
-                "Respond naturally and briefly to the message below. Use the conversation notes only for what the user "
-                "told you or asked earlier (such as their name). Never invent facts about the user; if they ask about "
-                "something that was not said, say you don't remember it being mentioned. You cannot see the user's "
-                "documents in this reply, so never describe what a document says: if they want something from a "
-                "document, ask them to put it as a question.\n\n"
-                + (context + "\n\n" if context else "") + f"Message: {query}", num_predict=120, prefer_local=(user_id is None))
+            with tr.purpose("Replying to small talk"):
+                answer = llm_generate(
+                    "Respond naturally and briefly to the message below. Use the conversation notes only for what the user "
+                    "told you or asked earlier (such as their name). Never invent facts about the user; if they ask about "
+                    "something that was not said, say you don't remember it being mentioned. You cannot see the user's "
+                    "documents in this reply, so never describe what a document says: if they want something from a "
+                    "document, ask them to put it as a question.\n\n"
+                    + (context + "\n\n" if context else "") + f"Message: {query}", num_predict=120, prefer_local=(user_id is None))
         return {"answer": answer, "sources": [], "action_taken": "CHAT"}
 
     else:  # SEARCH
@@ -1775,6 +1919,10 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
         else:
             is_relevant = check_relevance(query, context)
 
+        tr.add_step("note", "Relevance check", {
+            "best_similarity": round(1 - float(best_distance), 3),
+            "decision": "relevant" if is_relevant else "not relevant",
+            "rule": "similarity 0.75+ is relevant, 0.55 or less is not, in between the model decides"})
         if not is_relevant:
             return {
                 "answer": "I don't know — this doesn't appear to be covered in the knowledge base.",
@@ -1782,6 +1930,7 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
                 "action_taken": "SEARCH_NO_MATCH"
             }
 
+        _trace_context([(cid, src, text) for (cid, src, text, _) in results])
         answer = generate_answer(query, results, elaborate=elaborate)
         sources = _sources_used(answer, [(src, text) for (_, src, text, _) in results])
         source_refs = _source_refs(answer, [(cid, src, text) for (cid, src, text, _) in results], sources)
