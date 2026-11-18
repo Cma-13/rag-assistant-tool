@@ -96,11 +96,22 @@ function plural(n: number, word: string) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
+// The PDF reader marks page starts with "--- Page 3 ---"; that is not part of the document.
+function readable(text: string) {
+  return text
+    .replace(/-{3}\s*Page \d+\s*-{3}/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Long enough that two lines cut it off, so "Show full chunk" is worth showing
+const SHORT_TEXT = 150;
+
 // The full text of a chunk, shown when a row is opened
 function FullText({ text }: { text: string }) {
   return (
     <p className="mt-1.5 max-h-60 overflow-auto whitespace-pre-wrap rounded-md border border-[#EFEBE4] bg-white px-2 py-1.5 text-[#1C1C1E]">
-      {text}
+      {text.replace(/-{3}\s*Page \d+\s*-{3}\n?/g, "").trim()}
     </p>
   );
 }
@@ -166,7 +177,9 @@ function HitRow({
 }) {
   const chunks = useContext(ChunksContext);
   const [open, setOpen] = useState(false);
-  const full = h.id !== undefined ? chunks[String(h.id)]?.text : undefined;
+  const stored = h.id !== undefined ? chunks[String(h.id)]?.text : undefined;
+  const full =
+    stored && readable(stored).length > SHORT_TEXT ? stored : undefined;
   return (
     <li className="rounded-lg bg-[#FAF8F4] px-2 py-1.5">
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5">
@@ -201,7 +214,9 @@ function HitRow({
       {open && full ? (
         <FullText text={full} />
       ) : (
-        <p className="mt-0.5 line-clamp-2 text-[#6B6B6B]">{h.text}</p>
+        <p className="mt-0.5 line-clamp-2 text-[#6B6B6B]">
+          {readable(stored ?? h.text)}
+        </p>
       )}
       {full && (
         <button
@@ -256,13 +271,6 @@ function ContextDetail({ detail: d }: { detail: Record<string, unknown> }) {
               />
             ))}
           </ol>
-          {used.size > 0 && (
-            <p className="text-[11px] text-[#9A968C]">
-              &ldquo;Likely used&rdquo; means the passage shares words or
-              numbers with the answer. It is an estimate: the model saw every
-              passage above and may use one without repeating its words.
-            </p>
-          )}
         </>
       )}
     </div>
@@ -289,7 +297,10 @@ function PassageRow({
           {index + 1}. {where(info)}
         </span>
         {used && (
-          <span className="whitespace-nowrap rounded-full bg-[#5E7C5C] px-1.5 py-px text-[10.5px] font-medium text-white">
+          <span
+            className="whitespace-nowrap rounded-full bg-[#5E7C5C] px-1.5 py-px text-[10.5px] font-medium text-white"
+            title="This passage shares words or numbers with the answer"
+          >
             likely used
           </span>
         )}
@@ -297,28 +308,26 @@ function PassageRow({
       {open ? (
         <FullText text={info.text} />
       ) : (
-        <p className="mt-0.5 line-clamp-2 text-[#6B6B6B]">{info.text}</p>
+        <p className="mt-0.5 line-clamp-2 text-[#6B6B6B]">
+          {readable(info.text)}
+        </p>
       )}
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        className="mt-0.5 text-[11px] font-medium text-[#5E7C5C] underline-offset-2 hover:underline"
-      >
-        {open ? "Show less" : "Show full chunk"}
-      </button>
+      {readable(info.text).length > SHORT_TEXT && (
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          className="mt-0.5 text-[11px] font-medium text-[#5E7C5C] underline-offset-2 hover:underline"
+        >
+          {open ? "Show less" : "Show full chunk"}
+        </button>
+      )}
     </li>
   );
 }
 
 // How one source document was prepared when it was uploaded
-function DocumentDetail({
-  detail: d,
-  showPipeline,
-}: {
-  detail: Record<string, unknown>;
-  showPipeline: boolean;
-}) {
+function DocumentDetail({ detail: d }: { detail: Record<string, unknown> }) {
   if (!("recorded" in d)) return <KeyValues detail={d} />; // answers saved before this view existed
   const textPages = (d.text_pages as number[] | undefined) ?? [];
   const ocrPages = (d.ocr_pages as number[] | undefined) ?? [];
@@ -359,7 +368,7 @@ function DocumentDetail({
   if (d.added) rows.push(["Uploaded", String(d.added)]);
 
   return (
-    <div className="space-y-1">
+    <div>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
         {rows.map(([k, v]) => (
           <div key={k} className="contents">
@@ -368,15 +377,63 @@ function DocumentDetail({
           </div>
         ))}
       </dl>
-      {showPipeline && (
-        <p className="text-[11px] text-[#9A968C]">
-          Same for every document: split at headings into chunks of about 500
-          characters (50 overlap), each turned into 768 numbers with
-          multilingual-e5-base, stored in pgvector with a full-text index.
-        </p>
-      )}
     </div>
   );
+}
+
+// Smaller steps (document picked, table reading, relevance check), in plain sentences
+function NoteDetail({ detail: d }: { detail: Record<string, unknown> }) {
+  const doc = d.document ? String(d.document) : "";
+  if (d.method === "file name match") {
+    return (
+      <p className="text-[#6B6B6B]">
+        Picked because the words in the question match this file&rsquo;s name.
+      </p>
+    );
+  }
+  if (d.method === "conversation") {
+    return (
+      <p className="text-[#6B6B6B]">
+        The question points to the document the last answer came from.
+      </p>
+    );
+  }
+  if (d.pieces !== undefined) {
+    return (
+      <p className="text-[#6B6B6B]">
+        Read in {plural(Number(d.pieces), "piece")} ({String(d.characters)}{" "}
+        characters)
+        {d.contains_tables
+          ? ", including its tables"
+          : "; it has no tables, so the values were taken from its text"}
+        .
+      </p>
+    );
+  }
+  if (d.earlier_question) {
+    return (
+      <p className="text-[#6B6B6B]">
+        Follow-up to &ldquo;{String(d.earlier_question)}&rdquo;, so a longer
+        summary of the same document was written.
+      </p>
+    );
+  }
+  if (d.best_similarity !== undefined) {
+    return (
+      <p className="text-[#6B6B6B]">
+        Best match {Number(d.best_similarity).toFixed(2)}
+        {d.question_word_in_passages
+          ? ", with words from the question in the passages"
+          : ""}
+        : judged <span className="text-[#1C1C1E]">{String(d.decision)}</span>.
+      </p>
+    );
+  }
+  if (d.error) {
+    return <p className="text-[#6B6B6B]">{String(d.error)}</p>;
+  }
+  if (doc && Object.keys(d).length === 1) return null; // the title already names the document
+  return <KeyValues detail={d} />;
 }
 
 function KeyValues({
@@ -491,11 +548,6 @@ function RetrievalDetail({ detail }: { detail: Record<string, unknown> }) {
               added, so a fact cut at a chunk boundary is not lost.
             </p>
           )}
-          <p className="text-[11px] text-[#9A968C]">
-            Bars compare each passage with the best match. With this embedding
-            model every passage scores about 0.7 or more, so only the order
-            matters, not the number itself.
-          </p>
         </>
       )}
       {tab === "vector" && (
@@ -522,13 +574,7 @@ function RetrievalDetail({ detail }: { detail: Record<string, unknown> }) {
   );
 }
 
-function StepDetail({
-  step,
-  showPipeline = false,
-}: {
-  step: TraceStep;
-  showPipeline?: boolean;
-}) {
+function StepDetail({ step }: { step: TraceStep }) {
   const d = step.detail ?? {};
   switch (step.kind) {
     case "retrieval":
@@ -616,7 +662,9 @@ function StepDetail({
     case "context":
       return <ContextDetail detail={d} />;
     case "document":
-      return <DocumentDetail detail={d} showPipeline={showPipeline} />;
+      return <DocumentDetail detail={d} />;
+    case "note":
+      return <NoteDetail detail={d} />;
     default:
       return <KeyValues detail={d} />;
   }
@@ -629,7 +677,6 @@ export default function AnswerTrace({ trace }: { trace: Trace }) {
 
   const searches = trace.steps.filter((s) => s.kind === "retrieval").length;
   const modelCalls = trace.steps.filter((s) => s.kind === "llm").length;
-  const firstDocument = trace.steps.findIndex((s) => s.kind === "document");
 
   return (
     <ChunksContext.Provider value={trace.chunks ?? {}}>
@@ -711,10 +758,7 @@ export default function AnswerTrace({ trace }: { trace: Trace }) {
                   )}
                   {isOpen && step.detail && (
                     <div className="mt-1">
-                      <StepDetail
-                        step={step}
-                        showPipeline={i === firstDocument}
-                      />
+                      <StepDetail step={step} />
                     </div>
                   )}
                 </li>
