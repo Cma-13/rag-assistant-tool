@@ -187,8 +187,10 @@ def _clean_extracted_text(text):
     return _UTF16_RUN.sub(decode, text).replace("\x00", "")
 
 
-def ocr_pdf(pdf_path, lang="eng"):
-    """Read a scanned PDF (pages that are only images) by recognising the text with OCR."""
+def ocr_pdf(pdf_path, lang="eng", stats=None):
+    """Read a scanned PDF (pages that are only images) by recognising the text with OCR.
+    If `stats` (a dict) is given, it is filled with how each page was read:
+    pages, text_pages, ocr_pages and table_pages (page numbers start at 1), tables."""
     doc = fitz.open(pdf_path)
     full_text = ""
 
@@ -221,6 +223,8 @@ def ocr_pdf(pdf_path, lang="eng"):
             has_text_layer = bool(page.get_text().strip())
             native_text = _page_text_outside_tables(page, boxes_by_page.get(page_num, []))
 
+            if stats is not None:
+                stats.setdefault("text_pages" if has_text_layer else "ocr_pages", []).append(page_num + 1)
             if has_text_layer:
                 # (a page that is entirely a table leaves no loose text; that is fine,
                 # it must not be sent to OCR)
@@ -247,6 +251,13 @@ def ocr_pdf(pdf_path, lang="eng"):
                     label = f"Table {t_idx + 1} on Page {page_num + 1}" + (f" - {title}" if title else "")
                     table_text += f"\n\n[{label}]\n{_format_table(table)}"
             page_parts.append((page_num, text, table_text))
+
+    if stats is not None:
+        stats["pages"] = len(page_parts)
+        stats.setdefault("text_pages", [])
+        stats.setdefault("ocr_pages", [])
+        stats["table_pages"] = sorted(p + 1 for p in tables_by_page)
+        stats["tables"] = sum(len(t) for t in tables_by_page.values())
 
     full_text = ""
     for page_num, text, table_text in page_parts:
@@ -344,6 +355,64 @@ def chunk_text(text, chunk_size=500, chunk_overlap=50):
 def embed_chunks(chunks):
     prefixed_chunks = [f"passage: {chunk}" for chunk in chunks]
     return model.encode(prefixed_chunks)
+
+
+_DOCUMENT_INFO_READY = False
+
+
+def _ensure_document_info():
+    """Create the document_info table if it is missing (databases made before it existed)."""
+    global _DOCUMENT_INFO_READY
+    if _DOCUMENT_INFO_READY:
+        return
+    with db_cursor(commit=True) as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS document_info (
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                source_file TEXT NOT NULL,
+                pages INTEGER,
+                text_pages INTEGER[],
+                ocr_pages INTEGER[],
+                table_pages INTEGER[],
+                tables INTEGER,
+                created_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (user_id, source_file)
+            )""")
+    _DOCUMENT_INFO_READY = True
+
+
+def save_document_info(source_file, user_id, stats):
+    """Remember how each page of an uploaded document was read (shown in the answer trace)."""
+    _ensure_document_info()
+    with db_cursor(commit=True) as cur:
+        cur.execute(
+            """INSERT INTO document_info (user_id, source_file, pages, text_pages, ocr_pages, table_pages, tables)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (user_id, source_file) DO UPDATE SET
+                 pages = EXCLUDED.pages, text_pages = EXCLUDED.text_pages, ocr_pages = EXCLUDED.ocr_pages,
+                 table_pages = EXCLUDED.table_pages, tables = EXCLUDED.tables, created_at = NOW()""",
+            (user_id, source_file, stats.get("pages"), stats.get("text_pages", []), stats.get("ocr_pages", []),
+             stats.get("table_pages", []), stats.get("tables", 0)))
+
+
+def forget_document_info(source_file, user_id):
+    _ensure_document_info()
+    with db_cursor(commit=True) as cur:
+        cur.execute("DELETE FROM document_info WHERE user_id = %s AND source_file = %s", (user_id, source_file))
+
+
+def _document_info(source_file, user_id):
+    """The saved page details of a document, or None for files uploaded before they were saved."""
+    _ensure_document_info()
+    with db_cursor() as cur:
+        cur.execute("""SELECT pages, text_pages, ocr_pages, table_pages, tables FROM document_info
+                       WHERE user_id = %s AND source_file = %s""", (user_id, source_file))
+        row = cur.fetchone()
+    if not row:
+        return None
+    pages, text_pages, ocr_pages, table_pages, tables = row
+    return {"pages": pages, "text_pages": text_pages or [], "ocr_pages": ocr_pages or [],
+            "table_pages": table_pages or [], "tables": tables or 0}
 
 
 def store_chunks(source_file, chunks, embeddings, content_hash, user_id, pages=None):
@@ -444,22 +513,52 @@ def retrieve_chunks(query, user_id, top_k=5, source_file=None, candidate_k=20):
     return [rows[i] for i in best_ids]
 
 
+def _chunk_positions(ids, user_id):
+    """{chunk id: (document, page, position, total)}: where each chunk sits in its
+    document, e.g. chunk 7 of 16. Chunks of one upload are stored in order, so the
+    order of their ids is their order in the document."""
+    ids = [i for i in dict.fromkeys(ids) if i is not None]
+    if not ids:
+        return {}
+    with db_cursor() as cur:
+        cur.execute(
+            """WITH wanted AS (SELECT DISTINCT source_file FROM document_chunks
+                               WHERE id = ANY(%s) AND user_id = %s)
+               SELECT c.id, c.source_file, c.page_number,
+                      ROW_NUMBER() OVER (PARTITION BY c.source_file ORDER BY c.id),
+                      COUNT(*) OVER (PARTITION BY c.source_file)
+               FROM document_chunks c JOIN wanted w ON w.source_file = c.source_file
+               WHERE c.user_id = %s""",
+            (ids, user_id, user_id))
+        wanted = set(ids)
+        return {cid: (doc, page, pos, total) for cid, doc, page, pos, total in cur.fetchall() if cid in wanted}
+
+
+def _remember_chunks(rows, user_id):
+    """Store full text and position of these chunks in the trace. rows: (id, document, text)."""
+    if not tr.active():
+        return {}
+    rows = [r for r in rows if not tr.known_chunk(r[0])]
+    where = _chunk_positions([r[0] for r in rows], user_id) if rows else {}
+    for cid, doc, text in rows:
+        _, page, pos, total = where.get(cid, (doc, None, None, None))
+        tr.remember_chunk(cid, {"document": doc, "page": page, "position": pos, "of": total, "text": text})
+    return where
+
+
 def _trace_retrieval(query, keyword_q, scope, semantic, keyword, best_ids, scores, user_id,
                      embed_ms, vector_ms, keyword_ms, show=5):
     """Add one 'retrieval' step showing what each search method found."""
-    ids = {r[0] for r in semantic[:show]} | {r[0] for r in keyword[:show]} | set(best_ids)
-    pages = {}
-    if ids:
-        with db_cursor() as cur:
-            cur.execute("SELECT id, page_number FROM document_chunks WHERE id = ANY(%s) AND user_id = %s",
-                        (list(ids), user_id))
-            pages = dict(cur.fetchall())
+    by_id = {r[0]: r for r in list(semantic) + list(keyword)}
+    ids = [r[0] for r in semantic[:show]] + [r[0] for r in keyword[:show]] + list(best_ids)
+    _remember_chunks([(i, by_id[i][1], by_id[i][2]) for i in dict.fromkeys(ids)], user_id)
     in_vec = {r[0]: rank + 1 for rank, r in enumerate(semantic)}
     in_kw = {r[0]: rank + 1 for rank, r in enumerate(keyword)}
-    by_id = {r[0]: r for r in list(semantic) + list(keyword)}
 
     def hit(r):
-        return {"document": r[1], "page": pages.get(r[0]), "similarity": round(1 - float(r[3]), 3),
+        info = tr.chunk(r[0])
+        return {"id": r[0], "document": r[1], "page": info.get("page"), "position": info.get("position"),
+                "of": info.get("of"), "similarity": round(1 - float(r[3]), 3),
                 "text": " ".join(r[2].split())[:140]}
 
     merged = []
@@ -965,6 +1064,7 @@ _ABOUT_UPLOADS = re.compile(
     r"|\b(?:i|we)(?:\s+have|\s+had|'ve)?\s+(?:just\s+)?(?:uploaded|attached|gave|given|sent|shared|provided|added)\b"
     r"|\bnew(?:ly)?\s+(?:uploaded\s+)?(?:documents?|files?|pdfs?)\b",
     re.IGNORECASE)
+_SUMMARIZE_START = re.compile(r"^\s*(?:please\s+)?(?:summari[sz]e|give\s+(?:me\s+)?a\s+summary\s+of|sum\s+up)\b", re.IGNORECASE)
 _SUMMARY_WORDS = re.compile(r"\b(summari[sz]e|summary|overview|gist)\b", re.IGNORECASE)
 
 
@@ -1580,7 +1680,7 @@ Rules you must follow:
         if step == max_steps - 1:
             # Last step: no more searching. Asking the model to answer while still offering
             # the tool can fail on Groq, which used to throw away every search done so far.
-            return _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, step)
+            return _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, step, user_id)
         choice = "required" if step == 0 else "auto"
         try:
             with tr.purpose(f"Agent step {step + 1}: deciding what to do next"):
@@ -1614,7 +1714,7 @@ Rules you must follow:
 
         if not msg.tool_calls:
             tr.retitle_last("llm", f"Agent step {step + 1}: writing the final answer")
-            _trace_context(all_hits, after_answer=True)
+            _trace_context(all_hits, user_id, after_answer=True)
             docs_used = _sources_used(msg.content or "", all_chunks)
             return {
                 "answer": msg.content,
@@ -1669,7 +1769,7 @@ Rules you must follow:
     }
 
 
-def _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, step):
+def _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, step, user_id):
     """Write the answer from every passage the searches found, without offering the
     search tool again (a plain chat call, so the model can only answer)."""
     unique = {}
@@ -1684,7 +1784,7 @@ def _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, ste
         messages.append({"role": "assistant", "content": turn["answer"]})
     messages.append({"role": "user", "content":
                      f"{query}\n\nAnswer now using only these search results (no more searches):\n\n{results}"})
-    _trace_context(all_hits)
+    _trace_context(all_hits, user_id)
     with tr.purpose(f"Agent step {step + 1}: writing the final answer from all searches"):
         answer = groq_chat(messages).choices[0].message.content or ""
     docs_used = _sources_used(answer, all_chunks)
@@ -1696,7 +1796,7 @@ def _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, ste
     }
 
 
-def _trace_context(hits, after_answer=False):
+def _trace_context(hits, user_id, after_answer=False):
     """Record what was handed to the language model to write the answer.
     after_answer=True: the answer was already written (agent loop), so the step
     goes just before that model call in the list."""
@@ -1705,17 +1805,40 @@ def _trace_context(hits, after_answer=False):
     unique = {}
     for cid, doc, text in hits:
         unique[cid] = (doc, text)
+    _remember_chunks([(cid, doc, text) for cid, (doc, text) in unique.items()], user_id)
     chars = sum(len(text) for _, text in unique.values())
     detail = {
         "passages": len(unique),
         "documents": sorted({doc for doc, _ in unique.values()}),
         "characters": chars,
         "approx_tokens": chars // 4,
+        "ids": list(unique),  # the exact passages, in the order the model saw them
     }
     if after_answer:
         tr.add_step_before_last("llm", "context", "Passages given to the language model", detail)
     else:
         tr.add_step("context", "Passages given to the language model", detail)
+
+
+def _trace_mark_used(result):
+    """Mark the passages sent to the model that share words or numbers with the answer.
+    This is an estimate (word overlap, like the Sources line), not proof: the model
+    can use a passage without repeating its words."""
+    if not tr.active():
+        return
+    sources = set(result.get("sources") or [])
+    tokens = _answer_tokens((result.get("answer") or "").replace("\u2019", "'").replace("\u2018", "'"))
+    for step in tr.steps_since(0):
+        if step["kind"] != "context":
+            continue
+        scores = {}
+        for cid in step["detail"].get("ids", []):
+            info = tr.chunk(cid)
+            if info.get("document") in sources:
+                low = info.get("text", "").lower()
+                scores[cid] = sum(1 for t in tokens if t in low)
+        best = max(scores.values(), default=0)
+        step["detail"]["likely_used"] = [cid for cid, sc in scores.items() if best and sc >= max(2, 0.5 * best)]
 
 
 def _trace_documents(docs, user_id):
@@ -1733,17 +1856,23 @@ def _trace_documents(docs, user_id):
             chunks, pages_with_text, last_page, table_chunks, avg_len, added = cur.fetchone()
             if not chunks:
                 continue
-            tr.add_step("document", f"How {doc} was indexed", {
-                "pages": last_page,
+            info = None
+            try:
+                info = _document_info(doc, user_id)
+            except Exception as e:
+                print(f"TRACE: could not read document_info ({type(e).__name__}): {e}")
+            detail = {
                 "chunks": chunks,
                 "chunks_with_tables": table_chunks or 0,
                 "average_chunk_characters": int(avg_len or 0),
-                "chunking": "Heading-aware splitting, 500 characters with 50 overlap",
-                "text_reading": "PyMuPDF for text, pdfplumber for tables, Tesseract OCR for scanned pages",
-                "embedding": "multilingual-e5-base (768 numbers per chunk)",
-                "stored_in": "PostgreSQL + pgvector, with a GIN full-text index",
                 "added": added.strftime("%d %b %Y, %H:%M") if added else None,
-            })
+            }
+            if info:
+                detail.update(pages=info["pages"], text_pages=info["text_pages"], ocr_pages=info["ocr_pages"],
+                              table_pages=info["table_pages"], tables=info["tables"], recorded=True)
+            else:
+                detail.update(pages=last_page, recorded=False)
+            tr.add_step("document", f"How {doc} was indexed", detail)
 
 
 def _resolve_summary_doc(query, user_id, source_file, history=None):
@@ -1839,6 +1968,7 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
                            or (intent["detail"]["action"] == "SEARCH" and final.startswith("AGENT"))):
             intent["detail"]["final_action"] = final
         _trace_documents(result.get("sources") or [], user_id)
+        _trace_mark_used(result)
         result["trace"] = tr.finish()
         return result
     finally:
@@ -1889,6 +2019,10 @@ def _answer_query(query, user_id, source_file=None, history=None, user_messages=
         if pointed:
             scope = [pointed]
             action = "SUMMARY" if ("?" not in query and len(query.split()) <= 8) else "SEARCH"
+    # "Summarize the solar explainer": a summary request whose words name one of the files.
+    if (action == "SEARCH" and user_id is not None and not scope and _SUMMARIZE_START.match(query)
+            and _best_name_match(query, list_documents(user_id))):
+        action = "SUMMARY"
     # Several documents to summarise: one short summary per document.
     if len(scope or []) >= 2 and action in ("SUMMARY", "SEARCH", "CHAT") and _SUMMARY_WORDS.search(query):
         action = "OVERVIEW"
@@ -2164,7 +2298,7 @@ def _answer_query(query, user_id, source_file=None, history=None, user_messages=
                 "action_taken": "SEARCH_NO_MATCH"
             }
 
-        _trace_context([(cid, src, text) for (cid, src, text, _) in results])
+        _trace_context([(cid, src, text) for (cid, src, text, _) in results], user_id)
         answer = generate_answer(query, results, elaborate=elaborate)
         sources = _sources_used(answer, [(src, text) for (_, src, text, _) in results])
         source_refs = _source_refs(answer, [(cid, src, text) for (cid, src, text, _) in results], sources)
