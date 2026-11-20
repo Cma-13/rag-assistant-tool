@@ -237,13 +237,28 @@ function ContextDetail({ detail: d }: { detail: Record<string, unknown> }) {
   const chunks = useContext(ChunksContext);
   const [show, setShow] = useState(false);
   const ids = (d.ids as number[] | undefined) ?? [];
-  const used = new Set((d.likely_used as number[] | undefined) ?? []);
+  // "cited": the passages the model listed as its sources. Older answers only have
+  // "likely_used", which was estimated from shared words.
+  const cited = d.cited as number[] | undefined;
+  const byModel = Array.isArray(cited);
+  const used = new Set(
+    byModel ? cited : ((d.likely_used as number[] | undefined) ?? []),
+  );
   const summary = (
-    <p className="text-[#6B6B6B]">
-      {String(d.passages)} passages from {(d.documents as string[]).join(", ")}{" "}
-      · about {String(d.approx_tokens)} tokens ({String(d.characters)}{" "}
-      characters)
-    </p>
+    <div className="space-y-0.5 text-[#6B6B6B]">
+      <p>
+        {String(d.passages)} passages from{" "}
+        {(d.documents as string[]).join(", ")} · about {String(d.approx_tokens)}{" "}
+        tokens ({String(d.characters)} characters)
+      </p>
+      {byModel && (
+        <p>
+          {used.size
+            ? `The model cited ${used.size} of them as the source of its answer.`
+            : "The model said none of these passages answer the question."}
+        </p>
+      )}
+    </div>
   );
   if (!ids.length || !ids.some((id) => chunks[String(id)])) return summary;
   return (
@@ -268,6 +283,7 @@ function ContextDetail({ detail: d }: { detail: Record<string, unknown> }) {
                 index={i}
                 info={chunks[String(id)]}
                 used={used.has(id)}
+                byModel={byModel}
               />
             ))}
           </ol>
@@ -281,10 +297,12 @@ function PassageRow({
   index,
   info,
   used,
+  byModel,
 }: {
   index: number;
   info?: ChunkInfo;
   used: boolean;
+  byModel: boolean;
 }) {
   const [open, setOpen] = useState(false);
   if (!info) return null;
@@ -299,9 +317,13 @@ function PassageRow({
         {used && (
           <span
             className="whitespace-nowrap rounded-full bg-[#5E7C5C] px-1.5 py-px text-[10.5px] font-medium text-white"
-            title="This passage shares words or numbers with the answer"
+            title={
+              byModel
+                ? "The model listed this passage as a source of its answer"
+                : "This passage shares words or numbers with the answer"
+            }
           >
-            likely used
+            {byModel ? "cited by the model" : "likely used"}
           </span>
         )}
       </div>
