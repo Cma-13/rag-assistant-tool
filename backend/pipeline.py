@@ -1586,6 +1586,53 @@ SEARCH_TOOL = [{
 }]
 
 
+def _agent_tools(user_id):
+    """The tools the agent may use, as listed by DocQuery's MCP server.
+    If the MCP server can't be reached, the built-in search tool is used instead."""
+    try:
+        import mcp_client
+        return mcp_client.tools_for_llm(user_id), "MCP"
+    except Exception as e:
+        print(f"MCP: could not list tools ({type(e).__name__}): {e}")
+        return SEARCH_TOOL, None
+
+
+def _search(query, user_id, source_file=None, top_k=5):
+    """Run a document search through DocQuery's MCP server (the search_documents tool).
+    Returns rows of (chunk id, document, text), with the following chunks added.
+    If the MCP server can't be reached, the same search runs directly, and the trace says so."""
+    files = _as_scope(source_file)
+    args = {"query": query, "top_k": top_k}
+    if files and len(files) == 1:
+        args["source_file"] = files[0]
+    elif files:
+        args["within"] = files
+    try:
+        import mcp_client
+        data, ms = mcp_client.call_tool("search_documents", args, user_id)
+        tr.note_last_of("agent", via="MCP", server="DocQuery", transport="Streamable HTTP", mcp_ms=round(ms))
+        return [(r["id"], r["document"], r["text"]) for r in data.get("results", [])]
+    except Exception as e:
+        print(f"MCP: search_documents failed ({type(e).__name__}): {e}; searching directly")
+        tr.note_last_of("agent", via="direct", mcp_error=f"{type(e).__name__}: {str(e)[:120]}")
+        rows = add_following_chunks(retrieve_chunks(query, user_id, top_k=top_k, source_file=files), user_id)
+        return [(r[0], r[1], r[2]) for r in rows]
+
+
+def _call_other_tool(name, args, user_id):
+    """A tool other than search_documents (for example list_my_documents, or tools of
+    MCP servers added later). The result is passed to the model as JSON text."""
+    import mcp_client
+    try:
+        data, ms = mcp_client.call_tool(name, args, user_id)
+        tr.note_last_of("agent", via="MCP", mcp_ms=round(ms))
+        data = {k: v for k, v in data.items() if k != "trace"}
+        return json.dumps(data, ensure_ascii=False, default=str)
+    except Exception as e:
+        tr.note_last_of("agent", via="MCP", mcp_error=f"{type(e).__name__}: {str(e)[:120]}")
+        return f"The tool {name} failed: {e}"
+
+
 def _match_doc_name(name, docs):
     """The model sometimes shortens a file name ('The_Thirty_Nin...') or drops '.pdf'.
     Map what it wrote to a real document; None when nothing fits (search everything)."""
@@ -1666,7 +1713,7 @@ Rules you must follow:
         for doc in missing:
             tr.add_step("agent", f"Comparison question: the app also searched {doc} on its own",
                         {"tool": "search_documents", "query": query, "source_file": doc})
-            results = add_following_chunks(retrieve_chunks(query, user_id, top_k=4, source_file=[doc]), user_id)
+            results = _search(query, user_id, [doc], top_k=4)
             searched_alone.add(doc)
             all_sources.extend(r[1] for r in results)
             all_chunks.extend((r[1], r[2]) for r in results)
@@ -1676,6 +1723,12 @@ Rules you must follow:
                          "Extra search results, one search per document being compared (use them to answer):\n\n"
                          + "\n\n".join(parts)})
 
+    agent_tools, tools_from = _agent_tools(user_id)
+    tr.add_step("agent", "Loaded the tools the agent can use", {
+        "tools": [t["function"]["name"] for t in agent_tools],
+        "from": "DocQuery MCP server (list_tools)" if tools_from else "built-in list (MCP server not reachable)",
+    })
+
     for step in range(max_steps):
         if step == max_steps - 1:
             # Last step: no more searching. Asking the model to answer while still offering
@@ -1684,7 +1737,7 @@ Rules you must follow:
         choice = "required" if step == 0 else "auto"
         try:
             with tr.purpose(f"Agent step {step + 1}: deciding what to do next"):
-                response = groq_chat(messages, tools=SEARCH_TOOL, tool_choice=choice)
+                response = groq_chat(messages, tools=agent_tools, tool_choice=choice)
             msg = response.choices[0].message
         except Exception as e:
             # Groq sometimes answers in text instead of calling the forced tool and then
@@ -1700,8 +1753,7 @@ Rules you must follow:
         if step == 0 and not msg.tool_calls:
             tr.add_step("agent", "The model did not call the search tool, so the app searched directly",
                         {"tool": "search_documents", "query": query, "source_file": scope or "all documents"})
-            results = retrieve_chunks(query, user_id, top_k=8, source_file=scope)
-            results = add_following_chunks(results, user_id)
+            results = _search(query, user_id, scope, top_k=8)
             all_sources.extend(r[1] for r in results)
             all_chunks.extend((r[1], r[2]) for r in results)
             all_hits.extend((r[0], r[1], r[2]) for r in results)
@@ -1729,7 +1781,13 @@ Rules you must follow:
             "tool_calls": [tc.model_dump() for tc in msg.tool_calls],
         })
         for call in msg.tool_calls:
-            args = json.loads(call.function.arguments)
+            args = json.loads(call.function.arguments or "{}")
+            if call.function.name != "search_documents":
+                tr.add_step("agent", f"Agent step {step + 1}: the model called {call.function.name}",
+                            {"tool": call.function.name, "arguments": args})
+                messages.append({"role": "tool", "tool_call_id": call.id,
+                                 "content": _call_other_tool(call.function.name, args, user_id)})
+                continue
             written = args.get("source_file")
             wanted = _match_doc_name(written, docs)
             detail = {"tool": "search_documents", "query": args.get("query", query),
@@ -1740,11 +1798,7 @@ Rules you must follow:
             if scope:
                 # never search outside the files the user picked
                 wanted = [wanted] if wanted in scope else scope
-            results = retrieve_chunks(
-                args.get("query", query), user_id, top_k=5,
-                source_file=wanted
-            )
-            results = add_following_chunks(results, user_id)
+            results = _search(args.get("query", query), user_id, wanted, top_k=5)
             print(f"AGENT SEARCH: query={args.get('query')!r} source_file={args.get('source_file')!r} -> {len(results)} chunks from {sorted(set(r[1] for r in results))}")
 
 
