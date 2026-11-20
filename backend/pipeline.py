@@ -1386,7 +1386,8 @@ def _doc_mentioned_loosely(query, docs):
 _REWORK = re.compile(
     r"\b(shorter|shorten|briefer|brief(?:ly)?|simpler|simplify|simply|"
     r"(?:simple|easy|easier|plain|layman'?s?)\s+(?:words|terms|english|language|way)|"
-    r"in\s+(?:one|a)\s+(?:sentence|line|word)|bullet(?:s|\s+points?)?|in\s+points|rephrase|reword|rewrite|"
+    r"in\s+(?:one|a)\s+(?:sentence|line|word)|in\s+(?:short|brief)|short(?:er)?\s+version|tl;?dr|"
+    r"bullet(?:s|\s+points?)?|in\s+points|rephrase|reword|rewrite|"
     r"say\s+(?:that|it)\s+again|translate)\b", re.IGNORECASE)
 
 # "make it longer", "tell me more", "give an example": a fuller answer is wanted,
@@ -1407,7 +1408,7 @@ _SHORT_FOLLOWUP = re.compile(
 # Words that can appear in a follow-up like "make it shorter" or "give me an example then".
 # If a message has any other word (a topic such as "RAG" or "the penalty clause"), it is a
 # new question and is never treated as a follow-up.
-_FOLLOWUP_VOCAB = set("""terms language way easy easier plain simply layman laymans understand understandable
+_FOLLOWUP_VOCAB = set("""terms language way easy easier plain simply layman laymans understand understandable version tl dr
 make it that this those these them its shorter shorten longer simpler simplify simple more detail
 details detailed in one a an the sentence line word words bullet bullets point points please can you could give me example
 for tell explain elaborate expand go on continue then now again rephrase reword rewrite translate into to nepali english hindi
@@ -1437,7 +1438,7 @@ def _rework_instruction(query):
     q = query.lower()
     if re.search(r"\bone\s+(?:sentence|line|word)\b|\ba\s+(?:sentence|line|word)\b", q):
         return "Write it as exactly one short sentence."
-    if re.search(r"\bshorter|\bshorten|\bbrief", q):
+    if re.search(r"\bshorter|\bshorten|\bbrief|\bin\s+short\b|\bshort\s+version|\btl;?dr", q):
         return "Make it clearly shorter: at most two sentences, keeping only the key facts."
     if re.search(r"\bsimpl", q):
         return "Use very simple words and short sentences, as if explaining to a child."
@@ -1678,11 +1679,12 @@ Rules you must follow:
 6. If nothing relevant is found after searching, say you don't know.
 7. Copy numbers, IDs, dates and account numbers exactly as they appear in the search results - never reformat them, add spaces to them, or recalculate them. If a value (such as a total) is not actually written in the results, do not work it out yourself; say it isn't stated.
 8. If the user asks about you (who you are, what you can do), say briefly that you are a document Q&A assistant that answers questions from the PDFs they upload. Never describe what the documents say as your own skills, knowledge or experience.
-9. Answer only if the search results directly state the thing asked about. Do not guess from related details: a phone number of the seller is not the buyer's, and a black telephone does not tell you the colour of a door. If the results are about a different person, company or thing than the one asked about, say you couldn't find it.
+9. Answer only if the search results directly state the thing asked about. Do not guess from related details: a phone number of the seller is not the buyer's, and a black telephone does not tell you the colour of a door. Do not work out a fact from other facts either: if the results only mention something in passing (for example inside an address), they do not answer a question about it. If the results don't say it in words, or are about a different person, company or thing than the one asked about, say you couldn't find it.
 10. If the user asks how many items or rows there are and that number is not written in the results, say it isn't stated - do not count them yourself.
-11. Write currency exactly as it appears in the results (for example Rs. or NPR); never change it to another symbol such as the rupee sign or a dollar sign."""
+11. Write currency exactly as it appears in the results (for example Rs. or NPR); never change it to another symbol such as the rupee sign or a dollar sign.
+12. Every search result starts with a passage number such as [P3]. Always write your answer for the user first, in full sentences - even when the results don't answer the question, write a short sentence saying so. Then add one last line in exactly this form: SOURCES: P3, P7 - listing only the passages your answer uses, or SOURCES: none if the results don't answer the question. Do not write passage numbers anywhere else."""
     if elaborate:
-        system_prompt += "\n12. " + (elaborate if isinstance(elaborate, str) else _MORE_DETAIL)
+        system_prompt += "\n13. " + (elaborate if isinstance(elaborate, str) else _MORE_DETAIL)
     if notes:
         system_prompt += ("\n\nThings the user told you earlier in this chat (about themselves - use them only if they help, "
                           "and never as a source of facts about the documents):\n- " + "\n- ".join(notes))
@@ -1696,6 +1698,16 @@ Rules you must follow:
     all_sources = []
     all_chunks = []  # (document, text) of everything the searches returned
     all_hits = []    # (chunk id, document, text), used to find page numbers
+    labels = {}      # chunk id -> passage number shown to the model ("P3")
+
+    def numbered(results):
+        """Search results as the model sees them: '[P3] (file.pdf) text'. A chunk keeps
+        its number across searches, so the model's SOURCES line points at real chunks."""
+        lines = []
+        for cid, doc, text in results:
+            label = labels.setdefault(cid, f"P{len(labels) + 1}")
+            lines.append(f"[{label}] ({doc}) {text}")
+        return "\n\n".join(lines)
 
     # "Compare the invoice and the electricity bill": every document the question names
     # gets its own search, done here in code so none is skipped by the model.
@@ -1718,7 +1730,7 @@ Rules you must follow:
             all_sources.extend(r[1] for r in results)
             all_chunks.extend((r[1], r[2]) for r in results)
             all_hits.extend((r[0], r[1], r[2]) for r in results)
-            parts.append(f"From {doc}:\n" + ("\n\n".join(r[2] for r in results) or "No relevant results found."))
+            parts.append(f"From {doc}:\n" + (numbered(results) or "No relevant results found."))
         messages.append({"role": "user", "content":
                          "Extra search results, one search per document being compared (use them to answer):\n\n"
                          + "\n\n".join(parts)})
@@ -1733,7 +1745,8 @@ Rules you must follow:
         if step == max_steps - 1:
             # Last step: no more searching. Asking the model to answer while still offering
             # the tool can fail on Groq, which used to throw away every search done so far.
-            return _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, step, user_id)
+            return _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, step, user_id,
+                                       numbered, labels)
         choice = "required" if step == 0 else "auto"
         try:
             with tr.purpose(f"Agent step {step + 1}: deciding what to do next"):
@@ -1758,7 +1771,7 @@ Rules you must follow:
             all_chunks.extend((r[1], r[2]) for r in results)
             all_hits.extend((r[0], r[1], r[2]) for r in results)
 
-            snippet = "\n\n".join(f"[{r[1]}] {r[2]}" for r in results) or "No relevant results found."
+            snippet = numbered(results) or "No relevant results found."
             messages.append({"role": "assistant", "content": msg.content or ""})
             messages.append({"role": "user", "content": f"Search results for your reference (use these to answer, don't just repeat them):\n\n{snippet}"})
             search_each_named_document()
@@ -1767,13 +1780,7 @@ Rules you must follow:
         if not msg.tool_calls:
             tr.retitle_last("llm", f"Agent step {step + 1}: writing the final answer")
             _trace_context(all_hits, user_id, after_answer=True)
-            docs_used = _sources_used(msg.content or "", all_chunks)
-            return {
-                "answer": msg.content,
-                "sources": docs_used,
-                "source_refs": _source_refs(msg.content or "", all_hits, docs_used),
-                "action_taken": "AGENT_SEARCH",
-            }
+            return _answer_with_sources(msg.content or "", labels, all_hits, all_chunks, query)
 
         messages.append({
             "role": "assistant",
@@ -1790,14 +1797,15 @@ Rules you must follow:
                 continue
             written = args.get("source_file")
             wanted = _match_doc_name(written, docs)
-            detail = {"tool": "search_documents", "query": args.get("query", query),
-                      "source_file": wanted or "all documents"}
-            if written and written != wanted:
-                detail["model_wrote"] = written  # e.g. a shortened name that was corrected
-            tr.add_step("agent", f"Agent step {step + 1}: the model called search_documents", detail)
             if scope:
                 # never search outside the files the user picked
                 wanted = [wanted] if wanted in scope else scope
+            searched_in = wanted if isinstance(wanted, list) else ([wanted] if wanted else None)
+            detail = {"tool": "search_documents", "query": args.get("query", query),
+                      "source_file": searched_in or "all documents"}
+            if written and written not in (searched_in or []):
+                detail["model_wrote"] = written  # e.g. a shortened name that was corrected
+            tr.add_step("agent", f"Agent step {step + 1}: the model called search_documents", detail)
             results = _search(args.get("query", query), user_id, wanted, top_k=5)
             print(f"AGENT SEARCH: query={args.get('query')!r} source_file={args.get('source_file')!r} -> {len(results)} chunks from {sorted(set(r[1] for r in results))}")
 
@@ -1805,7 +1813,7 @@ Rules you must follow:
             all_sources.extend(r[1] for r in results)
             all_chunks.extend((r[1], r[2]) for r in results)
             all_hits.extend((r[0], r[1], r[2]) for r in results)
-            snippet = "\n\n".join(f"[{r[1]}] {r[2]}" for r in results) or "No relevant results found."
+            snippet = numbered(results) or "No relevant results found."
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.id,
@@ -1823,7 +1831,69 @@ Rules you must follow:
     }
 
 
-def _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, step, user_id):
+# The last line of an agent answer: "SOURCES: P3, P7" or "SOURCES: none"
+# The model's citation: "SOURCES: P3, P7" or "SOURCES: none" - on its own line or at the
+# end of the answer's last sentence, bold or bulleted. Only passage numbers or "none"
+# count, so an answer line such as "Sources: cows and rice fields" is never removed.
+_SOURCES_LINE = re.compile(
+    r"(?:^|(?<=[\s.!?)\]]))[ \t>*_-]*SOURCES[*_]*[ \t]*:[*_]*[ \t]*"
+    r"((?:none|P[ \t]*\d+)(?:[ \t]*(?:,|and|&)[ \t]*P[ \t]*\d+)*)[ \t.*_]*(?=$|\n)",
+    re.IGNORECASE | re.MULTILINE)
+
+NOT_FOUND_ANSWER = "I couldn't find that in your documents."
+
+
+def _answer_with_sources(answer, labels, all_hits, all_chunks, query=""):
+    """Take the model's SOURCES line out of the answer and use it as the source list:
+    the sources are then the passages the model says it used, not a guess.
+    - no SOURCES line: fall back to matching the answer's words to the passages;
+    - the model wrote only "SOURCES: none": answer that it isn't in the documents;
+    - the model cited passages but wrote no text: write the answer from those passages.
+    The answer shown to the user is never empty."""
+    by_label = {label: cid for cid, label in labels.items()}
+    text_of = {cid: (doc, text) for cid, doc, text in all_hits}
+
+    lines = _SOURCES_LINE.findall(answer)
+    clean = _SOURCES_LINE.sub("", answer)
+    clean = re.sub(r"\s*\[P\d+(?:\s*,\s*P?\d+)*\]", "", clean)  # stray [P3] markers
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+
+    def by_words(text):
+        docs_used = _sources_used(text, all_chunks)
+        return {"answer": text, "sources": docs_used,
+                "source_refs": _source_refs(text, all_hits, docs_used), "action_taken": "AGENT_SEARCH"}
+
+    if not lines:
+        return by_words(clean or NOT_FOUND_ANSWER)
+
+    listed = " ".join(lines)
+    says_none = bool(re.search(r"\bnone\b", listed, re.IGNORECASE))
+    cited = list(dict.fromkeys(by_label[f"P{n}"] for n in re.findall(r"P\s*(\d+)", listed, re.IGNORECASE)
+                               if by_label.get(f"P{n}") in text_of))
+
+    if not cited:
+        if says_none:
+            return {"answer": clean or NOT_FOUND_ANSWER, "sources": [], "source_refs": [],
+                    "action_taken": "AGENT_SEARCH", "cited_ids": []}
+        return by_words(clean or NOT_FOUND_ANSWER)  # it listed passage numbers that don't exist
+
+    if not clean:
+        # it cited passages but wrote nothing else: answer from exactly those passages
+        clean = generate_answer(query, [(cid, *text_of[cid], 0.0) for cid in cited]).strip() or NOT_FOUND_ANSWER
+
+    docs = list(dict.fromkeys(text_of[cid][0] for cid in cited))
+    try:
+        page_of = _page_numbers(cited)
+    except Exception:
+        page_of = {}
+    refs = [{"file": doc, "pages": sorted({page_of[c] for c in cited
+                                           if text_of[c][0] == doc and page_of.get(c)})[:3]}
+            for doc in docs]
+    return {"answer": clean, "sources": docs, "source_refs": refs,
+            "action_taken": "AGENT_SEARCH", "cited_ids": cited}
+
+
+def _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, step, user_id, numbered, labels):
     """Write the answer from every passage the searches found, without offering the
     search tool again (a plain chat call, so the model can only answer)."""
     unique = {}
@@ -1831,7 +1901,7 @@ def _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, ste
         unique[cid] = (doc, text)
     if not unique:
         return {"answer": "I couldn't find that in your documents.", "sources": [], "action_taken": "AGENT_SEARCH"}
-    results = "\n\n".join(f"[{doc}] {text}" for doc, text in unique.values())
+    results = numbered([(cid, doc, text) for cid, (doc, text) in unique.items()])
     messages = [{"role": "system", "content": system_prompt}]
     for turn in (history or [])[-2:]:
         messages.append({"role": "user", "content": turn["question"]})
@@ -1841,13 +1911,7 @@ def _agent_final_answer(query, system_prompt, history, all_hits, all_chunks, ste
     _trace_context(all_hits, user_id)
     with tr.purpose(f"Agent step {step + 1}: writing the final answer from all searches"):
         answer = groq_chat(messages).choices[0].message.content or ""
-    docs_used = _sources_used(answer, all_chunks)
-    return {
-        "answer": answer,
-        "sources": docs_used,
-        "source_refs": _source_refs(answer, all_hits, docs_used),
-        "action_taken": "AGENT_SEARCH",
-    }
+    return _answer_with_sources(answer, labels, all_hits, all_chunks, query)
 
 
 def _trace_context(hits, user_id, after_answer=False):
@@ -1874,11 +1938,36 @@ def _trace_context(hits, user_id, after_answer=False):
         tr.add_step("context", "Passages given to the language model", detail)
 
 
-def _trace_mark_used(result):
-    """Mark the passages sent to the model that share words or numbers with the answer.
-    This is an estimate (word overlap, like the Sources line), not proof: the model
-    can use a passage without repeating its words."""
+# Answers that say the documents don't have it ("I couldn't find…", "none of the documents…")
+_NOT_FOUND = re.compile(
+    r"\b(couldn'?t|could not|can'?t|cannot|was not able to|wasn'?t able to|unable to) find\b|"
+    r"\b(don'?t|do not|doesn'?t|does not) (contain|include|mention|say|state|have)\b|"
+    r"\bnone of the (provided |uploaded |your )?documents\b|\bno information (about|on)\b|"
+    r"\b(isn'?t|is not|aren'?t|are not) (stated|mentioned|covered|given)\b|\bnot (found|covered) in\b",
+    re.IGNORECASE)
+
+
+def _no_sources_when_not_found(result):
+    """A short answer saying the documents don't have it should not list sources:
+    the passages were searched, but none of them answered the question."""
+    answer = (result.get("answer") or "").strip().replace("\u2019", "'")  # Groq often writes ’
+    if result.get("sources") and len(answer) <= 220 and _NOT_FOUND.search(answer):
+        result["sources"] = []
+        result["source_refs"] = []
+
+
+def _trace_mark_used(result, cited=None):
+    """Mark which passages sent to the model the answer used.
+    cited: the passages the model listed in its SOURCES line (used as they are).
+    Without that line, passages sharing words or numbers with the answer are marked
+    as likely used - an estimate, since the model can use a passage without repeating it."""
     if not tr.active():
+        return
+    if cited is not None:
+        cited_set = set(cited)
+        for step in tr.steps_since(0):
+            if step["kind"] == "context":
+                step["detail"]["cited"] = [cid for cid in step["detail"].get("ids", []) if cid in cited_set]
         return
     sources = set(result.get("sources") or [])
     tokens = _answer_tokens((result.get("answer") or "").replace("\u2019", "'").replace("\u2018", "'"))
@@ -2021,8 +2110,17 @@ def agent_query(query, user_id, source_file=None, history=None, user_messages=No
         if intent and not (final.startswith(intent["detail"]["action"])
                            or (intent["detail"]["action"] == "SEARCH" and final.startswith("AGENT"))):
             intent["detail"]["final_action"] = final
+        if not str(result.get("answer") or "").strip():
+            # never show an empty answer, whatever path produced it
+            tr.add_step("note", "The model returned an empty answer", {"error": "empty answer from the model"})
+            result["answer"] = "Sorry, I couldn't write an answer this time. Please try asking again."
+            result["sources"], result["source_refs"] = [], []
+        cited = result.pop("cited_ids", None)  # passages the model listed in its SOURCES line
+        if cited is None and (str(result.get("action_taken", "")).startswith("AGENT")
+                              or result.get("action_taken") == "SEARCH"):
+            _no_sources_when_not_found(result)  # no SOURCES line: fall back to reading the answer
         _trace_documents(result.get("sources") or [], user_id)
-        _trace_mark_used(result)
+        _trace_mark_used(result, cited)
         result["trace"] = tr.finish()
         return result
     finally:
@@ -2062,6 +2160,7 @@ def _answer_query(query, user_id, source_file=None, history=None, user_messages=
     # talk, or for a search that would drag in the topic of an earlier answer: use the document
     # it names, or the one we are talking about.
     if (action in ("CHAT", "SEARCH") and user_id is not None and not scope and not _is_user_fact(query)
+            and not _followup_kind(query, history)  # "tell me that in one sentence" reworks the last answer
             and not _ABOUT_CONVERSATION.search(query) and not _ABOUT_ASSISTANT.search(query)
             and query.lower().strip("!.? ") not in GREETING_KEYWORDS
             and (action == "CHAT" or _DEICTIC.search(query))):
