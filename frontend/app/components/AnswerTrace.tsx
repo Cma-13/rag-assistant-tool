@@ -381,6 +381,90 @@ function DocumentDetail({ detail: d }: { detail: Record<string, unknown> }) {
   );
 }
 
+// How a tool call reached its tool: through MCP, or directly when MCP was unreachable
+function ViaLine({ detail: d }: { detail: Record<string, unknown> }) {
+  if (d.via === "MCP") {
+    return (
+      <span className="text-[#9A968C]">
+        {" "}
+        · called through MCP
+        {d.server
+          ? ` (${String(d.server)} server, ${String(d.transport ?? "")})`
+          : ""}
+        {d.mcp_ms !== undefined ? `, ${formatMs(Number(d.mcp_ms))}` : ""}
+      </span>
+    );
+  }
+  if (d.via === "direct") {
+    return (
+      <span className="text-[#9A968C]">
+        {" "}
+        · the MCP server was not reachable, so the search ran directly
+      </span>
+    );
+  }
+  return null;
+}
+
+function AgentDetail({ detail: d }: { detail: Record<string, unknown> }) {
+  // The tools the agent was given (asked from the MCP server with list_tools)
+  if (Array.isArray(d.tools)) {
+    return (
+      <p className="text-[#6B6B6B]">
+        {(d.tools as string[]).map((name, i) => (
+          <span key={name}>
+            {i > 0 && ", "}
+            <code className="rounded bg-[#F4F1EA] px-1 font-mono text-[11px]">
+              {name}
+            </code>
+          </span>
+        ))}{" "}
+        · from the {String(d.from)}
+      </p>
+    );
+  }
+  const tool = (
+    <code className="rounded bg-[#F4F1EA] px-1 font-mono text-[11px]">
+      {String(d.tool)}
+    </code>
+  );
+  // Any tool other than the document search
+  if (d.tool !== "search_documents") {
+    const args =
+      d.arguments && typeof d.arguments === "object"
+        ? Object.entries(d.arguments)
+        : [];
+    return (
+      <p className="text-[#6B6B6B]">
+        Tool {tool}
+        {args.length
+          ? ` with ${args.map(([k, v]) => `${k} = ${String(v)}`).join(", ")}`
+          : ""}
+        <ViaLine detail={d} />
+      </p>
+    );
+  }
+  return (
+    <p className="text-[#6B6B6B]">
+      Tool {tool} with query{" "}
+      <span className="text-[#1C1C1E]">&ldquo;{String(d.query)}&rdquo;</span> in{" "}
+      <span className="text-[#1C1C1E]">
+        {Array.isArray(d.source_file)
+          ? d.source_file.join(", ")
+          : String(d.source_file)}
+      </span>
+      {d.model_wrote ? (
+        <span className="text-[#9A968C]">
+          {" "}
+          (the model wrote &ldquo;{String(d.model_wrote)}&rdquo;, matched to the
+          real file)
+        </span>
+      ) : null}
+      <ViaLine detail={d} />
+    </p>
+  );
+}
+
 // Smaller steps (document picked, table reading, relevance check), in plain sentences
 function NoteDetail({ detail: d }: { detail: Record<string, unknown> }) {
   const doc = d.document ? String(d.document) : "";
@@ -634,31 +718,7 @@ function StepDetail({ step }: { step: TraceStep }) {
         </p>
       );
     case "agent":
-      return (
-        <p className="text-[#6B6B6B]">
-          Tool{" "}
-          <code className="rounded bg-[#F4F1EA] px-1 font-mono text-[11px]">
-            {String(d.tool)}
-          </code>{" "}
-          with query{" "}
-          <span className="text-[#1C1C1E]">
-            &ldquo;{String(d.query)}&rdquo;
-          </span>{" "}
-          in{" "}
-          <span className="text-[#1C1C1E]">
-            {Array.isArray(d.source_file)
-              ? d.source_file.join(", ")
-              : String(d.source_file)}
-          </span>
-          {d.model_wrote ? (
-            <span className="text-[#9A968C]">
-              {" "}
-              (the model wrote &ldquo;{String(d.model_wrote)}&rdquo;, matched to
-              the real file)
-            </span>
-          ) : null}
-        </p>
-      );
+      return <AgentDetail detail={d} />;
     case "context":
       return <ContextDetail detail={d} />;
     case "document":
