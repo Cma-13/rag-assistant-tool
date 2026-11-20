@@ -16,6 +16,7 @@ import os
 import httpx2
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
+from mcp_types import LATEST_PROTOCOL_VERSION
 
 import answer_trace as tr
 from auth import create_access_token
@@ -23,6 +24,10 @@ from auth import create_access_token
 # Where the backend reaches its own MCP server. In Docker and in local runs the
 # backend listens on port 8000; set DOCQUERY_MCP_URL if you run it on another port.
 DOCQUERY_MCP_URL = os.getenv("DOCQUERY_MCP_URL", "http://127.0.0.1:8000/mcp/")
+
+# Our own server speaks the latest MCP version, so the client uses it straight away
+# instead of first asking the server which versions it supports (one round trip less).
+PROTOCOL_VERSION = LATEST_PROTOCOL_VERSION
 
 # Tool arguments the app fills in itself; the language model never sees them.
 _APP_ONLY_ARGS = {"within", "top_k"}
@@ -42,13 +47,13 @@ def _headers(user_id, trace):
 
 async def _list_tools(user_id):
     async with httpx2.AsyncClient(headers=_headers(user_id, False), timeout=30) as http:
-        async with Client(streamable_http_client(DOCQUERY_MCP_URL, http_client=http)) as client:
+        async with Client(streamable_http_client(DOCQUERY_MCP_URL, http_client=http), mode=PROTOCOL_VERSION) as client:
             return (await client.list_tools()).tools
 
 
 async def _call_tool(name, arguments, user_id, trace):
     async with httpx2.AsyncClient(headers=_headers(user_id, trace), timeout=120) as http:
-        async with Client(streamable_http_client(DOCQUERY_MCP_URL, http_client=http)) as client:
+        async with Client(streamable_http_client(DOCQUERY_MCP_URL, http_client=http), mode=PROTOCOL_VERSION) as client:
             return await client.call_tool(name, arguments)
 
 
