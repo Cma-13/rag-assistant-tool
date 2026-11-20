@@ -1,3 +1,4 @@
+import contextlib
 import shutil
 import os
 import json
@@ -15,6 +16,7 @@ from pydantic import BaseModel
 from pipeline import ocr_pdf, chunk_text_with_pages, embed_chunks, store_chunks, retrieve_chunks, generate_answer, get_connection, db_cursor, list_documents
 from fastapi.middleware.cors import CORSMiddleware
 from pipeline import agent_query, save_document_info, forget_document_info
+import docquery_mcp
 from fastapi import Depends, HTTPException, Header
 from llm import LLMBusyError
 from auth import hash_password, verify_password, create_access_token, decode_access_token
@@ -27,7 +29,19 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 # Websites allowed to call this API (comma separated). Default: the local frontend.
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 
-app = FastAPI()
+# MCP over Streamable HTTP at /mcp/ (stateless: each call is a separate request).
+_mcp_app = docquery_mcp.server.streamable_http_app(streamable_http_path="/", stateless_http=True, json_response=True)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(app):
+    # DocQuery's own MCP server (the chat's agent calls its tools over MCP) needs its
+    # session manager running for as long as the app runs.
+    async with docquery_mcp.server.session_manager.run():
+        yield
+
+
+app = FastAPI(lifespan=_lifespan)
 
 # Uploaded PDFs are kept here (one folder per user, named by the file's hash),
 # so a source can be opened from the chat later.
@@ -544,3 +558,7 @@ def clear_chat(current_user: dict = Depends(get_current_user)):
     with db_cursor(commit=True) as cur:
         cur.execute("DELETE FROM chat_history WHERE user_id = %s", (current_user["user_id"],))
     return {"cleared": True}
+
+
+# Mounted last so all the normal routes above are matched first.
+app.mount("/mcp", _mcp_app)
