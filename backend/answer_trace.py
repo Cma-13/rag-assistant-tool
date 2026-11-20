@@ -52,6 +52,16 @@ def add_step_before_last(before_kind, kind, title, detail=None):
     trace["steps"].append(step)
 
 
+def note_last_of(kind, **fields):
+    """Add fields to the detail of the most recent step of this kind."""
+    trace = _current.get()
+    if trace:
+        for step in reversed(trace["steps"]):
+            if step["kind"] == kind:
+                step.setdefault("detail", {}).update(fields)
+                return
+
+
 def note_last(**fields):
     """Add fields to the detail of the most recent step."""
     trace = _current.get()
@@ -76,6 +86,17 @@ def chunk(chunk_id):
 def known_chunk(chunk_id):
     trace = _current.get()
     return trace is not None and str(chunk_id) in trace["chunks"]
+
+
+def merge(other):
+    """Add the steps and chunks another trace recorded (for example, the search steps
+    the MCP server sends back with its result) to the current trace."""
+    trace = _current.get()
+    if trace is None or not other:
+        return
+    trace["steps"].extend(other.get("steps") or [])
+    for cid, info in (other.get("chunks") or {}).items():
+        trace["chunks"].setdefault(str(cid), info)
 
 
 def step_count():
