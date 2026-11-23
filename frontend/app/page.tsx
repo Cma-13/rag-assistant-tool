@@ -37,9 +37,19 @@ interface Message {
   sources?: string[];
   sourceRefs?: { file: string; pages: number[] }[];
   trace?: Trace | null; // the steps taken to find this answer
+  action?: string; // how the backend handled it (for example EMAIL), sent back with follow-ups
+  emails?: EmailCard[]; // emails an answer is about, shown as cards under it
   attachments?: string[]; // PDFs attached to this question (shown as file cards)
   reading?: string; // set while PDFs are still being read: this message is replaced when they are ready
   uploads?: UploadItem[]; // status cards for PDFs added without a question
+}
+
+interface EmailCard {
+  from: string;
+  date: string; // already readable, in the user's time ("Today, 4:25 PM")
+  subject: string;
+  preview: string;
+  attachments: { filename: string; in_documents: boolean }[];
 }
 
 interface UploadItem {
@@ -329,6 +339,22 @@ function FileIcon() {
   );
 }
 
+function MailIcon() {
+  return (
+    <svg
+      className="h-3.5 w-3.5"
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      aria-hidden="true"
+    >
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.5 6.5l8.5 6 8.5-6" />
+    </svg>
+  );
+}
+
 function TrashIcon() {
   return (
     <svg
@@ -391,6 +417,74 @@ function BotIcon() {
   );
 }
 
+// Emails an answer is about, drawn by the app (not written by the model), so they always
+// look the same: sender and date, subject, a preview line and the attached files.
+function EmailCards({
+  emails,
+  onOpen,
+}: {
+  emails: EmailCard[];
+  onOpen: (name: string) => void;
+}) {
+  return (
+    <ul className="mt-3 space-y-2">
+      {emails.map((e, i) => (
+        <li key={i} className="rounded-xl border border-[#E9E4DA] bg-[#FBFAF7] px-3.5 py-2.5">
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="min-w-0 truncate text-[13px] font-semibold text-[#1C1C1E]">{e.from}</span>
+            <span className="flex-shrink-0 text-[11.5px] text-[#9A968C]">{e.date}</span>
+          </div>
+          <p className="mt-0.5 truncate text-[13px] text-[#3A3A3C]">
+            {e.subject && e.subject !== "(no subject)" ? (
+              e.subject
+            ) : (
+              <span className="italic text-[#9A968C]">No subject</span>
+            )}
+          </p>
+          {e.preview && (
+            <p className="mt-0.5 line-clamp-2 text-[12px] leading-snug text-[#8A867D]">{e.preview}</p>
+          )}
+          {e.attachments.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {e.attachments.map((a) =>
+                a.in_documents ? (
+                  <button
+                    key={a.filename}
+                    onClick={() => onOpen(a.filename)}
+                    title={`In your documents · open ${a.filename}`}
+                    className="flex max-w-full items-center gap-1.5 rounded-lg border border-[#B8CFB3] bg-[#EEF4EC] px-2 py-1 text-[11.5px] text-[#3F5A3D] transition hover:border-[#5E7C5C]"
+                  >
+                    <span className="rounded bg-white px-1 text-[9px] font-bold text-red-600">PDF</span>
+                    <span className="truncate">{a.filename}</span>
+                    <span className="flex-shrink-0 text-[#6F8F6C]" aria-label="in your documents">
+                      <span className="sm:hidden">✓</span>
+                      <span className="hidden sm:inline">· in your documents</span>
+                    </span>
+                  </button>
+                ) : (
+                  <span
+                    key={a.filename}
+                    className="flex max-w-full items-center gap-1.5 rounded-lg border border-[#E6E0D2] bg-white px-2 py-1 text-[11.5px] text-[#6B6B6B]"
+                  >
+                    <span
+                      className={`rounded px-1 text-[9px] font-bold ${
+                        a.filename.toLowerCase().endsWith(".pdf") ? "bg-red-50 text-red-600" : "bg-[#F4F1EA] text-[#8A867D]"
+                      }`}
+                    >
+                      {(a.filename.split(".").pop() ?? "FILE").toUpperCase().slice(0, 4)}
+                    </span>
+                    <span className="truncate">{a.filename}</span>
+                  </span>
+                ),
+              )}
+            </div>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -412,12 +506,25 @@ export default function Home() {
   const [deletingDoc, setDeletingDoc] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<File[]>([]);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  // Gmail: connected or not (null until known), and a short message after connecting
+  // (kept with the login it belongs to, so a different login never sees the last one's Gmail)
+  const [gmailState, setGmailState] = useState<{
+    token: string;
+    available: boolean;
+    connected: boolean;
+    email: string | null;
+  } | null>(null);
+  const gmail = gmailState && gmailState.token === token ? gmailState : null;
+  const [showGmail, setShowGmail] = useState(false);
+  const [gmailBusy, setGmailBusy] = useState(false);
+  const [gmailNotice, setGmailNotice] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Pop-ups (My documents, account menu) close when you click anywhere else or press Esc.
   useEffect(() => {
     const closePopups = () => {
       setShowDocs(false);
       setShowUserMenu(false);
+      setShowGmail(false);
       setConfirmDelete(null);
     };
     const onClick = (e: MouseEvent) => {
@@ -451,6 +558,75 @@ export default function Home() {
   useEffect(() => {
     tokenRef.current = token;
   }, [token]);
+
+  // Is Gmail connected? Asked again whenever the login changes.
+  useEffect(() => {
+    if (!token) return;
+    fetch(`${API_URL}/gmail/status`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => setGmailState(data ? { ...data, token } : null))
+      .catch(() => setGmailState(null));
+  }, [token]);
+
+  // Coming back from Google's permission page: ?gmail=connected or ?gmail_error=...
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("gmail") === "connected";
+    const error = params.get("gmail_error");
+    if (!connected && !error) return;
+    window.history.replaceState(null, "", window.location.pathname); // so a refresh doesn't show it again
+    // (not cancelled on cleanup: in development React runs this twice, and the second run
+    // finds the address already cleaned, so the first run's message must still appear)
+    setTimeout(() =>
+      setGmailNotice(
+        connected
+          ? { ok: true, text: "Gmail connected. Ask me about your emails, or to import a PDF attachment." }
+          : { ok: false, text: error ?? "Gmail was not connected." },
+      ),
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!gmailNotice) return;
+    const timer = setTimeout(() => setGmailNotice(null), 7000);
+    return () => clearTimeout(timer);
+  }, [gmailNotice]);
+
+  // "Connect Gmail": the backend gives the Google page to go to; Google sends the
+  // browser back to the app afterwards.
+  const connectGmail = async () => {
+    if (!token) return;
+    setGmailBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/gmail/connect`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok || !data.url) throw new Error(data.detail ?? "Gmail can't be connected right now.");
+      window.location.href = data.url;
+    } catch (e) {
+      setGmailNotice({ ok: false, text: e instanceof Error ? e.message : "Gmail can't be connected right now." });
+      setGmailBusy(false);
+    }
+  };
+
+  const disconnectGmail = async () => {
+    if (!token) return;
+    setGmailBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/gmail`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setGmailState((prev) => (prev ? { ...prev, connected: false, email: null } : prev));
+        setShowGmail(false);
+      }
+    } finally {
+      setGmailBusy(false);
+    }
+  };
 
   // ── Chat history: saved on the server, one history per user ──
   // `chatReadyFor` is the user whose saved chat has been loaded. Nothing is
@@ -643,6 +819,7 @@ export default function Home() {
         sources: string[];
         source_refs: { file: string; pages: number[] }[];
         attachments: string[];
+        action?: string;
       }[] = [];
       for (let i = 0; i < past.length - 1; i++) {
         if (past[i].role === "user" && past[i + 1]?.role === "assistant" && !past[i + 1].uploads) {
@@ -652,6 +829,7 @@ export default function Home() {
             sources: past[i + 1].sources ?? [],
             source_refs: past[i + 1].sourceRefs ?? [],
             attachments: past[i].attachments ?? [], // files attached to this question
+            action: past[i + 1].action, // "EMAIL" lets "import the second one" stay about emails
           });
         }
       }
@@ -673,6 +851,7 @@ export default function Home() {
           chat_user_messages: chatUserMessages,
           ...(scope && scope.length ? { source_files: scope } : {}),
           recent_uploads: recentUploads.current,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, // email times in the user's own time
         }),
       });
       const data = await res.json();
@@ -685,8 +864,18 @@ export default function Home() {
           sources: Array.isArray(data.sources) ? data.sources : [],
           sourceRefs: Array.isArray(data.source_refs) ? data.source_refs : [],
           trace: data.trace?.steps?.length ? data.trace : null,
+          action: data.action_taken,
+          emails: Array.isArray(data.emails) && data.emails.length ? data.emails : undefined,
         },
       ]);
+      // PDFs the agent imported from Gmail: show them being read, like an upload
+      const imported = Array.isArray(data.imported) ? data.imported : [];
+      if (imported.length && token) {
+        void watchInBackground(
+          imported.map((j: { job_id: string; filename: string }) => ({ id: j.job_id, name: j.filename })),
+          token,
+        );
+      }
     } catch {
       setMessages((prev) => [
         ...prev,
@@ -1105,7 +1294,7 @@ export default function Home() {
       )}
 
       {/* ── Top bar ───────────────────────────────── */}
-      <header className="flex items-center justify-between gap-3 border-b border-[#E6E0D2] bg-[#FEFAF3]/95 px-4 py-3 backdrop-blur sm:gap-4 sm:px-6">
+      <header className="relative z-30 flex items-center justify-between gap-3 border-b border-[#E6E0D2] bg-[#FEFAF3]/95 px-4 py-3 backdrop-blur sm:gap-4 sm:px-6">
         {/* Brand */}
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-[#5E7C5C] text-white shadow-sm [&_svg]:h-[18px] [&_svg]:w-[18px]">
@@ -1121,6 +1310,56 @@ export default function Home() {
         {/* Spacer keeps the upload and account buttons on the right */}
         <div className="flex-1" />
 
+        {/* Gmail */}
+        {token && gmail?.available && (
+          <div className="relative flex-shrink-0" data-popup>
+            {gmail.connected ? (
+              <button
+                onClick={() => {
+                  setShowGmail((prev) => !prev);
+                  setShowDocs(false);
+                  setShowUserMenu(false);
+                  setConfirmDelete(null);
+                }}
+                aria-expanded={showGmail}
+                title={`Gmail connected: ${gmail.email}`}
+                className="flex items-center gap-1.5 rounded-full border border-[#E6E0D2] bg-white px-3 py-1.5 text-xs font-medium text-[#6B6B6B] shadow-sm transition hover:border-[#B8CFB3] hover:text-[#5E7C5C]"
+              >
+                <MailIcon />
+                <span className="hidden sm:inline">Gmail</span>
+                <span className="h-1.5 w-1.5 rounded-full bg-[#5E7C5C]" aria-label="connected" />
+              </button>
+            ) : (
+              <button
+                onClick={connectGmail}
+                disabled={gmailBusy}
+                title="Let DocQuery read your Gmail (read-only)"
+                className="flex items-center gap-1.5 rounded-full border border-dashed border-[#C9C2B2] bg-white px-3 py-1.5 text-xs font-medium text-[#6B6B6B] transition hover:border-[#5E7C5C] hover:text-[#5E7C5C] disabled:opacity-60"
+              >
+                <MailIcon />
+                <span className="hidden sm:inline">{gmailBusy ? "Opening Google…" : "Connect Gmail"}</span>
+              </button>
+            )}
+            {showGmail && gmail.connected && (
+              <div className="absolute right-0 top-11 z-20 w-72 max-w-[calc(100vw-2rem)] rounded-2xl border border-[#E6E0D2] bg-white p-4 shadow-xl">
+                <p className="text-[13px] font-semibold text-[#1C1C1E]">Gmail connected</p>
+                <p className="mt-0.5 truncate text-[12.5px] text-[#6B6B6B]">{gmail.email}</p>
+                <p className="mt-2.5 text-[12px] leading-relaxed text-[#9A968C]">
+                  Read-only: I can find and read your emails and import PDF attachments, but never send or
+                  delete anything. Try &ldquo;Any emails with a PDF this week?&rdquo;
+                </p>
+                <button
+                  onClick={disconnectGmail}
+                  disabled={gmailBusy}
+                  className="mt-3 rounded-md border border-[#E6E0D2] px-2.5 py-1 text-[12px] text-[#6B6B6B] transition hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                >
+                  {gmailBusy ? "Disconnecting…" : "Disconnect Gmail"}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* My documents */}
         {token && (
           <div className="relative flex-shrink-0" data-popup>
@@ -1128,6 +1367,7 @@ export default function Home() {
               onClick={() => {
                 setShowDocs((prev) => !prev);
                 setShowUserMenu(false);
+                setShowGmail(false);
                 setConfirmDelete(null);
               }}
               aria-expanded={showDocs}
@@ -1213,6 +1453,7 @@ export default function Home() {
               onClick={() => {
                 setShowUserMenu((prev) => !prev);
                 setShowDocs(false);
+                setShowGmail(false);
                 setConfirmDelete(null);
               }}
               className="flex h-9 w-9 items-center justify-center rounded-full bg-[#5E7C5C] text-[13px] font-semibold text-white shadow-sm ring-2 ring-white transition hover:bg-[#4E684C]"
@@ -1272,6 +1513,26 @@ export default function Home() {
           </div>
         )}
       </header>
+
+      {gmailNotice && (
+        <div
+          role="status"
+          className={`flex items-center justify-center gap-3 border-b px-4 py-2 text-[12.5px] ${
+            gmailNotice.ok
+              ? "border-[#D7E5D3] bg-[#EEF4EC] text-[#3F5A3D]"
+              : "border-red-100 bg-red-50 text-red-700"
+          }`}
+        >
+          <span>{gmailNotice.text}</span>
+          <button
+            onClick={() => setGmailNotice(null)}
+            aria-label="Close"
+            className="rounded px-1 text-current opacity-60 transition hover:opacity-100"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {/* ── Messages ──────────────────────────────── */}
       <main className="flex flex-1 flex-col overflow-hidden">
@@ -1396,6 +1657,11 @@ export default function Home() {
                     <StructuredView structured={msg.structured} />
                   ) : (
                     renderContent(msg.content)
+                  )}
+
+                  {/* The emails an answer is about (Gmail) */}
+                  {msg.role === "assistant" && msg.emails && msg.emails.length > 0 && (
+                    <EmailCards emails={msg.emails} onOpen={(name) => openDocument(name)} />
                   )}
 
                   {/* Which document(s) the answer came from */}
