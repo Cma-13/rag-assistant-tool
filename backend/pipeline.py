@@ -1257,7 +1257,37 @@ New message: {query}
 Standalone question:"""
 
     rewritten = llm_generate(prompt, num_predict=60, temperature=0.1).strip().strip('"')
-    return rewritten if rewritten else query
+    if not rewritten:
+        return query
+    changed = _words_dropped_by_rewrite(query, rewritten)
+    if changed:
+        tr.add_step("rewrite", "Kept the question as typed",
+                    {"from": query, "to": rewritten, "kept": True, "changed": changed})
+        return query
+    return rewritten
+
+
+# Words a rewrite may drop or replace: the vague words it resolves, and small words.
+_REWRITE_MAY_DROP = {
+    "the", "and", "are", "was", "were", "for", "with", "what", "which", "who", "whom", "how",
+    "about", "can", "could", "would", "you", "tell", "please", "also", "then", "does", "did",
+    "has", "have", "had", "been", "from", "into", "than", "same", "one", "above", "previous",
+    "former", "latter", "mean", "meant",
+}
+
+
+def _words_dropped_by_rewrite(original, rewritten):
+    """A rewrite may only replace vague words ("it", "her", "that") with what they
+    point to. The real words of the question it dropped or swapped - "invoice" when
+    "the invoice" became "the electricity bill" - are returned; if there are any,
+    the rewrite changed the question and is not used."""
+    def words(text):
+        return re.findall(r"\w{3,}", text.lower())
+    vague = {w for w in words(original) if _FOLLOWUP_HINTS.fullmatch(w)}
+    kept = set(words(rewritten))
+    return [w for w in dict.fromkeys(words(original))
+            if w not in vague and w not in _REWRITE_MAY_DROP
+            and not any(k == w or (len(w) >= 5 and k[:5] == w[:5]) for k in kept)]
 
 # ── Conversation memory ──────────────────────────────────────────────────
 # Small facts the user states about themselves in the chat ("my name is Seema",
@@ -1386,7 +1416,7 @@ def _doc_mentioned_loosely(query, docs):
 _REWORK = re.compile(
     r"\b(shorter|shorten|briefer|brief(?:ly)?|simpler|simplify|simply|"
     r"(?:simple|easy|easier|plain|layman'?s?)\s+(?:words|terms|english|language|way)|"
-    r"in\s+(?:one|a)\s+(?:sentence|line|word)|in\s+(?:short|brief)|short(?:er)?\s+version|tl;?dr|"
+    r"in\s+(?:one|a|single|two|three|four|five|\d{1,2})\s+(?:short\s+)?(?:sentences?|lines?|words?|points?)|in\s+(?:short|brief)|short(?:er)?\s+version|tl;?dr|"
     r"bullet(?:s|\s+points?)?|in\s+points|rephrase|reword|rewrite|"
     r"say\s+(?:that|it)\s+again|translate)\b", re.IGNORECASE)
 
@@ -1410,7 +1440,7 @@ _SHORT_FOLLOWUP = re.compile(
 # new question and is never treated as a follow-up.
 _FOLLOWUP_VOCAB = set("""terms language way easy easier plain simply layman laymans understand understandable version tl dr
 make it that this those these them its shorter shorten longer simpler simplify simple more detail
-details detailed in one a an the sentence line word words bullet bullets point points please can you could give me example
+details detailed in one a an the single two three four five sentence sentences line lines word words bullet bullets point points please can you could give me example
 for tell explain elaborate expand go on continue then now again rephrase reword rewrite translate into to nepali english hindi
 briefly brief short so also and just little bit i want need would like be use say put as with some another of your answer
 response previous above last what said about is was thing things pls plz kindly thanks thank okay ok yes yeah sure hmm well but now""".split())
@@ -1436,8 +1466,15 @@ def _followup_kind(query, history):
 
 def _rework_instruction(query):
     q = query.lower()
-    if re.search(r"\bone\s+(?:sentence|line|word)\b|\ba\s+(?:sentence|line|word)\b", q):
-        return "Write it as exactly one short sentence."
+    n = re.search(r"\b(one|a|single|two|three|four|five|\d{1,2})\s+(?:short\s+)?(sentences?|lines?|words?|points?)\b", q)
+    if n:
+        count = {"one": 1, "a": 1, "single": 1, "two": 2, "three": 3, "four": 4, "five": 5}.get(n.group(1)) or int(n.group(1))
+        unit = n.group(2).rstrip("s")
+        if count == 1:
+            return "Write it as exactly one short sentence." if unit in ("sentence", "line") else f"Answer in exactly one {unit}."
+        if unit == "point":
+            return f"Write it as exactly {count} short bullet points."
+        return f"Write it in exactly {count} short {unit}s." if unit != "word" else f"Answer in at most {count} words."
     if re.search(r"\bshorter|\bshorten|\bbrief|\bin\s+short\b|\bshort\s+version|\btl;?dr", q):
         return "Make it clearly shorter: at most two sentences, keeping only the key facts."
     if re.search(r"\bsimpl", q):
@@ -1842,6 +1879,14 @@ _SOURCES_LINE = re.compile(
 
 NOT_FOUND_ANSWER = "I couldn't find that in your documents."
 
+# A passage number written inside the answer text, in any kind of bracket:
+# [P1]  【P1】  (P2, P5)  [P1-P3]  【P1†L3】  - group 1 holds the "P..." part.
+_INLINE_CITATION = re.compile(
+    r"[ \t]*[\[(【〔［（]\s*"
+    r"(P\s*\d+(?:\s*(?:[,;&\-–]|and)\s*P?\s*\d+)*)"
+    r"(?:\s*†[^\]\)】〕］）]*)?\s*[\])】〕］）]",
+    re.IGNORECASE)
+
 
 def _answer_with_sources(answer, labels, all_hits, all_chunks, query=""):
     """Take the model's SOURCES line out of the answer and use it as the source list:
@@ -1855,8 +1900,16 @@ def _answer_with_sources(answer, labels, all_hits, all_chunks, query=""):
 
     lines = _SOURCES_LINE.findall(answer)
     clean = _SOURCES_LINE.sub("", answer)
-    clean = re.sub(r"\s*\[P\d+(?:\s*,\s*P?\d+)*\]", "", clean)  # stray [P3] markers
+    # Passage numbers the model put inside the text anyway ("[P1]", "【P1】", "(P2, P5)",
+    # "【P1†L3】"): take them out of the answer, and count them as citations when the
+    # model wrote no SOURCES line.
+    inline = _INLINE_CITATION.findall(clean)
+    clean = _INLINE_CITATION.sub("", clean)
+    clean = re.sub(r"[ \t]+([.,;:!?])", r"\1", clean)
+    clean = re.sub(r"[ \t]{2,}", " ", clean)
     clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+    if not lines and inline:
+        lines = inline
 
     def by_words(text):
         docs_used = _sources_used(text, all_chunks)
