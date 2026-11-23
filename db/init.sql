@@ -41,3 +41,12 @@ CREATE TABLE IF NOT EXISTS chat_history (
     messages JSONB NOT NULL DEFAULT '[]',
     updated_at TIMESTAMP DEFAULT NOW()
 );
+
+-- A user's connected Gmail (read-only access). The refresh token is stored encrypted.
+-- The backend also creates this table itself if an older database does not have it.
+CREATE TABLE IF NOT EXISTS gmail_accounts (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    refresh_token TEXT NOT NULL,
+    connected_at TIMESTAMP DEFAULT NOW()
+);
