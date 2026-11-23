@@ -2,21 +2,21 @@ import contextlib
 import shutil
 import os
 import json
-import hashlib
-import threading
-import time
-import uuid
 import re
 import traceback
+from urllib.parse import urlencode
 from psycopg2.extras import Json
 from psycopg2.errors import UniqueViolation
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
-from pipeline import ocr_pdf, chunk_text_with_pages, embed_chunks, store_chunks, retrieve_chunks, generate_answer, get_connection, db_cursor, list_documents
+from pipeline import retrieve_chunks, generate_answer, get_connection, db_cursor, list_documents
 from fastapi.middleware.cors import CORSMiddleware
-from pipeline import agent_query, save_document_info, forget_document_info
+from pipeline import agent_query, forget_document_info
 import docquery_mcp
+import gmail_account
+import gmail_mcp
+import ingest
 from fastapi import Depends, HTTPException, Header
 from llm import LLMBusyError
 from auth import hash_password, verify_password, create_access_token, decode_access_token
@@ -29,27 +29,22 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 # Websites allowed to call this API (comma separated). Default: the local frontend.
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 
-# MCP over Streamable HTTP at /mcp/ (stateless: each call is a separate request).
+# The two MCP servers the chat's agent connects to, over Streamable HTTP (stateless:
+# each call is a separate request): DocQuery's own at /mcp/ and Gmail at /gmail-mcp/.
 _mcp_app = docquery_mcp.server.streamable_http_app(streamable_http_path="/", stateless_http=True, json_response=True)
+_gmail_mcp_app = gmail_mcp.server.streamable_http_app(streamable_http_path="/", stateless_http=True, json_response=True)
+# Where to send the browser back to after connecting Gmail.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 
 
 @contextlib.asynccontextmanager
 async def _lifespan(app):
-    # DocQuery's own MCP server (the chat's agent calls its tools over MCP) needs its
-    # session manager running for as long as the app runs.
-    async with docquery_mcp.server.session_manager.run():
+    # Each MCP server needs its session manager running for as long as the app runs.
+    async with docquery_mcp.server.session_manager.run(), gmail_mcp.server.session_manager.run():
         yield
 
 
 app = FastAPI(lifespan=_lifespan)
-
-# Uploaded PDFs are kept here (one folder per user, named by the file's hash),
-# so a source can be opened from the chat later.
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
-
-
-def pdf_path(user_id, content_hash):
-    return os.path.join(UPLOAD_DIR, str(user_id), f"{content_hash}.pdf")
 
 class SignupRequest(BaseModel):
     email: str
@@ -230,25 +225,6 @@ def read_root():
     return {"message": "Document Query Tool is running"}
 
 
-def get_unique_filename(cur, filename, user_id):
-    """If filename is already used by different content, append (1), (2), etc.
-    until we find a name not currently in the KB scoped to this user only,
-    since different users can have files with the same name."""
-    cur.execute("SELECT DISTINCT source_file FROM document_chunks WHERE user_id = %s;", (user_id,))
-    existing_names = {row[0] for row in cur.fetchall()}
-
-    if filename not in existing_names:
-        return filename
-
-    name, ext = os.path.splitext(filename)
-    counter = 1
-    while True:
-        candidate = f"{name}({counter}){ext}"
-        if candidate not in existing_names:
-            return candidate
-        counter += 1
-
-
 def get_optional_user(authorization: str = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         return None
@@ -260,168 +236,22 @@ def get_optional_user(authorization: str = Header(None)):
 
     return {"user_id": payload["user_id"], "email": payload["email"]}
 
-# ── Background reading of uploaded PDFs ───────────────────────────────────
-# /upload only saves the file and answers straight away. The slow part (reading
-# the text, OCR, embedding) runs in a background thread, so the server stays
-# responsive and the browser never waits on a big PDF. The jobs are kept in
-# memory: if the server restarts while a file is still being read, that job is
-# lost and the file simply has to be uploaded again.
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))  # biggest PDF accepted
-MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
-UPLOAD_JOBS = {}              # job_id -> {user_id, filename, hash, status, chunks, error, created}
-JOBS_LOCK = threading.Lock()  # protects UPLOAD_JOBS
-READ_SLOT = threading.Semaphore(1)  # only one PDF is read at a time; the others wait their turn
-JOB_KEEP_SECONDS = 3600       # finished jobs are forgotten after an hour
-
-
-class UploadReadError(Exception):
-    """A problem with the PDF itself that the user can understand (shown as it is)."""
-
-
-def _job_view(job_id, job):
-    return {"job_id": job_id, "filename": job["filename"], "status": job["status"],
-            "chunks": job["chunks"], "error": job["error"]}
-
-
-def _forget_old_jobs():
-    now = time.time()
-    with JOBS_LOCK:
-        for job_id in [j for j, v in UPLOAD_JOBS.items()
-                       if v["status"] != "reading" and now - v["created"] > JOB_KEEP_SECONDS]:
-            del UPLOAD_JOBS[job_id]
-
-
-def _read_pdf_in_background(job_id, saved_path, storage_filename, content_hash, user_id):
-    """Runs in its own thread: read the PDF, split it, embed it and store it."""
-    try:
-        with READ_SLOT:
-            page_stats = {}  # how each page was read (text layer or OCR), shown in the answer trace
-            text = ocr_pdf(saved_path, stats=page_stats)
-            chunk_pairs = chunk_text_with_pages(text)
-            if not chunk_pairs:
-                raise UploadReadError("No readable text was found in this PDF.")
-            chunks = [c for c, _ in chunk_pairs]
-            pages = [pg for _, pg in chunk_pairs]
-            embeddings = embed_chunks(chunks)
-            store_chunks(storage_filename, chunks, embeddings, content_hash, user_id, pages=pages)
-            try:
-                save_document_info(storage_filename, user_id, page_stats)
-            except Exception as e:  # the document is stored; only the trace details are missing
-                print(f"UPLOAD: could not save page details for '{storage_filename}' ({type(e).__name__}): {e}")
-        with JOBS_LOCK:
-            UPLOAD_JOBS[job_id].update(status="done", chunks=len(chunks))
-    except Exception as e:
-        print(f"UPLOAD: reading '{storage_filename}' failed ({type(e).__name__}): {e}")
-        traceback.print_exc()
-        # don't keep a file that never made it into the knowledge base
-        if os.path.exists(saved_path):
-            os.remove(saved_path)
-        message = str(e) if isinstance(e, UploadReadError) else "This PDF could not be read."
-        with JOBS_LOCK:
-            UPLOAD_JOBS[job_id].update(status="failed", error=message)
-
-
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
-    user_id = current_user["user_id"]
-    upload_name = os.path.basename((file.filename or "").replace("\\", "/")) or "document.pdf"
     # read one byte more than the limit, so a too-big file is noticed without loading all of it
-    content = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=f"This file is too large. The limit is {MAX_UPLOAD_MB} MB.")
-    if not content:
-        raise HTTPException(status_code=400, detail="This file is empty.")
-    if b"%PDF-" not in content[:1024]:
-        raise HTTPException(status_code=400, detail="This is not a PDF file. Only PDF files can be uploaded.")
-    content_hash = hashlib.sha256(content).hexdigest()
-    _forget_old_jobs()
-
-    # 0. The same file is already being read for this user -> just follow that job
-    with JOBS_LOCK:
-        for job_id, job in UPLOAD_JOBS.items():
-            if job["user_id"] == user_id and job["hash"] == content_hash and job["status"] == "reading":
-                return {"status": "reading", "job_id": job_id, "filename": job["filename"]}
-        reserved = {job["filename"] for job in UPLOAD_JOBS.values()
-                    if job["user_id"] == user_id and job["status"] == "reading"}
-
-    with db_cursor() as cur:
-        # 1. Same content already present for THIS user -> skip reprocessing entirely
-        cur.execute(
-            "SELECT COUNT(*) FROM document_chunks WHERE content_hash = %s AND user_id = %s",
-            (content_hash, user_id)
-        )
-        already_exists = cur.fetchone()[0] > 0
-
-        if already_exists:
-            # the name it is stored under may differ from the name of this upload
-            cur.execute(
-                "SELECT source_file FROM document_chunks WHERE content_hash = %s AND user_id = %s LIMIT 1",
-                (content_hash, user_id)
-            )
-            stored_name = cur.fetchone()[0]
-            return {
-                "status": "done",
-                "filename": stored_name,
-                "chunks_stored": 0,
-                "message": "This document (or an identical copy) is already in your knowledge base."
-            }
-
-        storage_filename = get_unique_filename(cur, upload_name, user_id)
-
-    # a name another file of this user is about to take (it is still being read)
-    if storage_filename in reserved:
-        name, ext = os.path.splitext(upload_name)
-        counter = 1
-        while storage_filename in reserved or _name_is_taken(storage_filename, user_id):
-            storage_filename = f"{name}({counter}){ext}"
-            counter += 1
-
-    saved_path = pdf_path(user_id, content_hash)
-    os.makedirs(os.path.dirname(saved_path), exist_ok=True)
-    with open(saved_path, "wb") as buffer:
-        buffer.write(content)
-
-    job_id = uuid.uuid4().hex
-    with JOBS_LOCK:
-        UPLOAD_JOBS[job_id] = {"user_id": user_id, "filename": storage_filename, "hash": content_hash,
-                               "status": "reading", "chunks": 0, "error": None, "created": time.time()}
-    threading.Thread(
-        target=_read_pdf_in_background,
-        args=(job_id, saved_path, storage_filename, content_hash, user_id),
-        daemon=True,
-    ).start()
-
-    return {"status": "reading", "job_id": job_id, "filename": storage_filename}
-
-
-def _name_is_taken(filename, user_id):
-    """True if this user already has a stored document with this exact name."""
-    with db_cursor() as cur:
-        cur.execute("SELECT 1 FROM document_chunks WHERE source_file = %s AND user_id = %s LIMIT 1;", (filename, user_id))
-        taken = cur.fetchone() is not None
-    return taken
+    content = await file.read(ingest.MAX_UPLOAD_BYTES + 1)
+    try:
+        return ingest.add_pdf(content, file.filename, current_user["user_id"])
+    except ingest.PdfRejected as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
 @app.get("/upload/status")
 def upload_status(ids: str | None = None, current_user: dict = Depends(get_current_user)):
     """How the background reading is going. With ids (comma separated job ids): those jobs.
     Without ids: all of this user's files that are still being read."""
-    user_id = current_user["user_id"]
     wanted = [i for i in (ids or "").split(",") if i]
-    with JOBS_LOCK:
-        if wanted:
-            jobs = {}
-            for job_id in wanted:
-                job = UPLOAD_JOBS.get(job_id)
-                if job and job["user_id"] == user_id:
-                    jobs[job_id] = _job_view(job_id, job)
-                else:
-                    # unknown: the server was restarted, or the job is too old
-                    jobs[job_id] = {"job_id": job_id, "status": "unknown", "filename": None,
-                                    "chunks": 0, "error": "This upload was interrupted. Please upload the PDF again."}
-            return {"jobs": jobs}
-        return {"jobs": {j: _job_view(j, v) for j, v in UPLOAD_JOBS.items()
-                         if v["user_id"] == user_id and v["status"] == "reading"}}
+    return {"jobs": ingest.jobs_status(current_user["user_id"], wanted)}
 
 
 class QueryRequest(BaseModel):
@@ -431,6 +261,7 @@ class QueryRequest(BaseModel):
     history: list[dict] | None = None  # recent [{"question":..., "answer":...}, ...] for follow-ups
     recent_uploads: list[str] | None = None  # the files added most recently, so "these two documents" can be understood
     chat_user_messages: list[str] | None = None  # everything the user typed in this chat, so small details they stated can be remembered
+    timezone: str | None = None  # the user's time zone from the browser (e.g. Asia/Kathmandu), for email times
 
 @app.post("/query")
 def query_documents(request: QueryRequest, current_user: dict | None = Depends(get_optional_user)):
@@ -438,7 +269,8 @@ def query_documents(request: QueryRequest, current_user: dict | None = Depends(g
     scope = request.source_files or request.source_file
     try:
         result = agent_query(request.question, user_id, source_file=scope, history=request.history,
-                             user_messages=request.chat_user_messages, recent_uploads=request.recent_uploads)
+                             user_messages=request.chat_user_messages, recent_uploads=request.recent_uploads,
+                             timezone=request.timezone)
     except Exception as e:
         # Never show the user a server error: say what happened in plain words.
         if isinstance(e, LLMBusyError):
@@ -457,8 +289,48 @@ def query_documents(request: QueryRequest, current_user: dict | None = Depends(g
         "action_taken": result["action_taken"],
         "structured": result.get("structured"),  # {"pairs": [...], "tables": [...], "note": "..."} for TABLE answers, else null
         "trace": result.get("trace"),  # the steps taken to find the answer, shown under it in the app
+        "imported": result.get("imported"),  # PDFs added from Gmail by this answer: [{"job_id", "filename"}], else null
+        "emails": result.get("emails"),  # emails the answer is about, shown as cards: [{"from", "date", "subject", "preview", "attachments"}]
     }
     
+# ── Gmail connection ─────────────────────────────────────────────────────
+@app.get("/gmail/status")
+def gmail_status(current_user: dict = Depends(get_current_user)):
+    """Whether this user has connected Gmail, and which address."""
+    return gmail_account.status(current_user["user_id"])
+
+
+@app.post("/gmail/connect")
+def gmail_connect(current_user: dict = Depends(get_current_user)):
+    """The Google page to send the browser to, where the user allows read-only Gmail access."""
+    try:
+        return {"url": gmail_account.connect_url(current_user["user_id"])}
+    except gmail_account.GmailError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/gmail/callback")
+def gmail_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+    """Google sends the browser back here after the permission screen. The result is
+    passed on to the app in the address (?gmail=connected or ?gmail_error=...)."""
+    if error or not code:
+        # "access_denied" when the user pressed Cancel on Google's screen
+        message = "Gmail was not connected." if error == "access_denied" else "Google did not finish the connection."
+        return RedirectResponse(f"{FRONTEND_URL}/?{urlencode({'gmail_error': message})}")
+    try:
+        gmail_account.finish_connect(code, state)
+    except gmail_account.GmailError as e:
+        return RedirectResponse(f"{FRONTEND_URL}/?{urlencode({'gmail_error': str(e)})}")
+    return RedirectResponse(f"{FRONTEND_URL}/?gmail=connected")
+
+
+@app.delete("/gmail")
+def gmail_disconnect(current_user: dict = Depends(get_current_user)):
+    """Disconnect Gmail (DocQuery's access is also cancelled at Google)."""
+    gmail_account.disconnect(current_user["user_id"])
+    return {"connected": False}
+
+
 @app.get("/documents")
 def get_documents(current_user: dict = Depends(get_current_user)):
     return {"documents": list_documents(current_user["user_id"])}
@@ -491,7 +363,7 @@ def delete_document(name: str, current_user: dict = Depends(get_current_user)):
     # also remove the stored PDF (older documents have none)
     if row and row[0]:
         try:
-            os.remove(pdf_path(user_id, row[0]))
+            os.remove(ingest.pdf_path(user_id, row[0]))
         except OSError:
             pass
 
@@ -512,7 +384,7 @@ def get_document_file(name: str, current_user: dict = Depends(get_current_user))
     if not row:
         raise HTTPException(status_code=404, detail="Document not found.")
 
-    path = pdf_path(user_id, row[0]) if row[0] else None
+    path = ingest.pdf_path(user_id, row[0]) if row[0] else None
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="The original file isn't stored for this document. Delete it and upload it again to enable opening.")
 
@@ -562,3 +434,4 @@ def clear_chat(current_user: dict = Depends(get_current_user)):
 
 # Mounted last so all the normal routes above are matched first.
 app.mount("/mcp", _mcp_app)
+app.mount("/gmail-mcp", _gmail_mcp_app)
