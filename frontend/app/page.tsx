@@ -1344,10 +1344,6 @@ export default function Home() {
               <div className="absolute right-0 top-11 z-20 w-72 max-w-[calc(100vw-2rem)] rounded-2xl border border-[#E6E0D2] bg-white p-4 shadow-xl">
                 <p className="text-[13px] font-semibold text-[#1C1C1E]">Gmail connected</p>
                 <p className="mt-0.5 truncate text-[12.5px] text-[#6B6B6B]">{gmail.email}</p>
-                <p className="mt-2.5 text-[12px] leading-relaxed text-[#9A968C]">
-                  Read-only: I can find and read your emails and import PDF attachments, but never send or
-                  delete anything. Try &ldquo;Any emails with a PDF this week?&rdquo;
-                </p>
                 <button
                   onClick={disconnectGmail}
                   disabled={gmailBusy}
