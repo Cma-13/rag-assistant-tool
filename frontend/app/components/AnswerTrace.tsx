@@ -428,6 +428,23 @@ function ViaLine({ detail: d }: { detail: Record<string, unknown> }) {
   return null;
 }
 
+// What a tool of another MCP server (Gmail) returned, in one plain sentence
+function ToolResult({ detail: d }: { detail: Record<string, unknown> }) {
+  let text: string | null = null;
+  if (d.mcp_error) text = `It failed: ${String(d.mcp_error)}`;
+  else if (d.found !== undefined)
+    text = Number(d.found) === 0 ? "No emails matched." : `Found ${plural(Number(d.found), "email")}.`;
+  else if (d.email_subject !== undefined)
+    text = `Read “${String(d.email_subject || "(no subject)")}”${d.email_from ? ` from ${String(d.email_from)}` : ""}.`;
+  else if (d.saved_as)
+    text =
+      d.import_status === "already in documents"
+        ? `Already in your documents as ${String(d.saved_as)}.`
+        : `Saved as ${String(d.saved_as)}; it is read and indexed like an uploaded PDF.`;
+  if (!text) return null;
+  return <p className={d.mcp_error ? "text-red-700" : "text-[#1C1C1E]"}>{text}</p>;
+}
+
 function AgentDetail({ detail: d }: { detail: Record<string, unknown> }) {
   // The tools the agent was given (asked from the MCP server with list_tools)
   if (Array.isArray(d.tools)) {
@@ -457,13 +474,18 @@ function AgentDetail({ detail: d }: { detail: Record<string, unknown> }) {
         ? Object.entries(d.arguments)
         : [];
     return (
-      <p className="text-[#6B6B6B]">
-        Tool {tool}
-        {args.length
-          ? ` with ${args.map(([k, v]) => `${k} = ${String(v)}`).join(", ")}`
-          : ""}
-        <ViaLine detail={d} />
-      </p>
+      <div className="space-y-1">
+        <p className="text-[#6B6B6B]">
+          Tool {tool}
+          {args.length
+            ? ` with ${args
+                .map(([k, v]) => `${k} = ${typeof v === "string" ? `“${v}”` : String(v)}`)
+                .join(", ")}`
+            : ""}
+          <ViaLine detail={d} />
+        </p>
+        <ToolResult detail={d} />
+      </div>
     );
   }
   return (
