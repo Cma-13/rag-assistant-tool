@@ -15,6 +15,7 @@ tool call can only ever see the logged-in user's own documents.
 from typing import Any
 
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 import answer_trace as tr
@@ -27,13 +28,14 @@ server = MCPServer(
 )
 
 
-def _user_id(ctx: Context) -> int:
+def user_id_from_request(ctx: Context) -> int:
     """The logged-in user, from the request's Authorization header."""
     auth = (ctx.headers or {}).get("authorization", "")
     token = auth[7:] if auth.lower().startswith("bearer ") else ""
     payload = decode_access_token(token) if token else None
     if not payload or "user_id" not in payload:
-        raise ValueError("Not logged in: send a valid DocQuery token in the Authorization header.")
+        # ToolError: the message reaches the caller (other errors are hidden by the MCP server)
+        raise ToolError("Not logged in: send a valid DocQuery token in the Authorization header.")
     return payload["user_id"]
 
 
@@ -52,7 +54,7 @@ def search_documents(
 ) -> dict[str, Any]:
     """Search the user's uploaded documents for information relevant to a query.
     Optionally restrict the search to one specific document by its exact filename (source_file)."""
-    user_id = _user_id(ctx)
+    user_id = user_id_from_request(ctx)
     files = [source_file] if source_file else (within or None)
     if _wants_trace(ctx):
         tr.start()
@@ -71,4 +73,4 @@ def search_documents(
 @server.tool(structured_output=True, annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False))
 def list_my_documents(ctx: Context) -> dict[str, Any]:
     """List the names of the documents in the user's knowledge base."""
-    return {"documents": list_documents(_user_id(ctx))}
+    return {"documents": list_documents(user_id_from_request(ctx))}
