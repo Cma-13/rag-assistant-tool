@@ -709,6 +709,22 @@ function StepDetail({ step }: { step: TraceStep }) {
       );
     }
     case "rewrite":
+      if (d.kept) {
+        const changed = (d.changed as string[] | undefined) ?? [];
+        return (
+          <p className="text-[#6B6B6B]">
+            The model suggested{" "}
+            <span className="text-[#1C1C1E]">&ldquo;{String(d.to)}&rdquo;</span>,
+            but that changes the question
+            {changed.length > 0 && (
+              <>
+                {" "}(it drops &ldquo;{changed.join("”, “")}&rdquo;)
+              </>
+            )}
+            , so it was searched as you typed it.
+          </p>
+        );
+      }
       return (
         <p className="text-[#6B6B6B]">
           <span className="text-[#1C1C1E]">&ldquo;{String(d.from)}&rdquo;</span>{" "}
