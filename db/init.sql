@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS document_info (
     pages INTEGER,
     text_pages INTEGER[],
     ocr_pages INTEGER[],
+    nepali_pages INTEGER[],          -- scanned pages read as Nepali
     table_pages INTEGER[],
     tables INTEGER,
     created_at TIMESTAMP DEFAULT NOW(),
