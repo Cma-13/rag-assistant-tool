@@ -35,8 +35,14 @@ This project was built to explore document intelligence, information retrieval, 
 - **Sign up and log in** with email and password, or **continue with Google**
 - Each user only sees their own documents and chat
 
+**Gmail (optional)**
+- **Connect Gmail** (read-only) from the header, then ask about your emails in the chat: "emails from Ashok this week", "read the latest invoice email"
+- Emails found are shown as **email cards** under the answer, with dates in your own time zone
+- **Import a PDF attachment** into your documents ("import the PDF from that email"), then ask questions about it like any uploaded file
+
 **Other**
-- **MCP server**: the knowledge base can be used from MCP-compatible apps such as Claude Desktop
+- **MCP inside the app**: the chat's agent reaches its tools through MCP servers: DocQuery's own document search server and a Gmail server, both running in the backend
+- **Answer trace**: each answer can show how it was made (the action chosen, the searches run, the passages used and the tools called)
 
 ---
 
@@ -76,7 +82,7 @@ Answer (Groq, or Ollama as fallback)  ──►  Grounded in the retrieved passa
 
 ### The Agent layer
 
-Every message is classified into one of six actions before anything else happens. Simple rules handle the clear cases, and the language model only decides between chat and search.
+Every message is classified into one of seven actions before anything else happens. Simple rules handle the clear cases, and the language model only decides between chat and search.
 
 | Action | Trigger | Behavior |
 |---|---|---|
@@ -85,7 +91,10 @@ Every message is classified into one of six actions before anything else happens
 | `SUMMARY` | "Summarize the story / this document" | Reads the whole document in order and writes a short summary |
 | `OVERVIEW` | "Overview of all documents", "summarize these two documents" | One or two sentences about each document |
 | `LIST` | "What documents do you have?" | Returns the list of uploaded documents |
+| `EMAIL` | A request about your Gmail ("emails from ...", "import the attachment") | Agent loop with the Gmail MCP tools: search emails, read one, import a PDF attachment |
 | `CHAT` | Greetings, small talk, facts about you, "what are we talking about?" | Responds conversationally without touching the documents |
+
+**MCP tools.** The agent does not call the search code directly. It is an MCP client (`mcp_client.py`) that connects to two MCP servers mounted in the backend over Streamable HTTP: DocQuery (`/mcp`, document search) and Gmail (`/gmail-mcp`, `search_emails`, `read_email`, `import_email_attachment`). It asks each server for its tools and gives them to the model, and only the tools offered for that request can be run. Each call carries the user's login token, so a tool only sees that user's documents and Gmail.
 
 **Agentic search.** In `SEARCH` the model is given a `search_documents` tool. The first search is always forced, so it can never answer from general knowledge. It sees which documents contain relevant passages and can search again inside each one, so a question touching several documents doesn't lose one. If the passages don't state the answer, the model says it couldn't find it.
 
@@ -110,7 +119,7 @@ Every message is classified into one of six actions before anything else happens
 | Storage and search | PostgreSQL + pgvector, PostgreSQL full-text search |
 | Language models | Groq `openai/gpt-oss-120b` and Ollama `llama3.2:3b` |
 | Authentication | JWT (python-jose), bcrypt (passlib), Google sign-in (google-auth) |
-| Integration | MCP server (MCP Python SDK) |
+| Integration | MCP Python SDK (DocQuery and Gmail MCP servers), Gmail API |
 | Frontend | Next.js (TypeScript, App Router, Tailwind CSS), `@react-oauth/google` |
 
 ---
@@ -120,19 +129,25 @@ Every message is classified into one of six actions before anything else happens
 ```
 rag-assistant-tool/
 ├── backend/
-│   ├── main.py          # FastAPI app and endpoints, background upload jobs
+│   ├── main.py          # FastAPI app and endpoints, mounts the MCP servers
 │   ├── pipeline.py      # Core pipeline: extraction, chunking, embedding, retrieval,
-│   │                    # agent routing, agent search loop, follow-ups, tables, summaries
+│   │                    # agent routing, agent loops, follow-ups, tables, summaries
+│   ├── ingest.py        # Adding a PDF: saving it and reading it in the background
+│   ├── mcp_client.py    # The agent's MCP client: lists and calls the servers' tools
+│   ├── docquery_mcp.py  # DocQuery MCP server (document search)
+│   ├── gmail_mcp.py     # Gmail MCP server (search, read, import attachment)
+│   ├── gmail_account.py # Connecting Gmail (Google OAuth) and calling the Gmail API
+│   ├── answer_trace.py  # Records how each answer was made
 │   ├── llm.py           # Groq / Ollama switch with automatic fallback
 │   ├── auth.py          # Password hashing and JWT helpers
-│   ├── mcp_server.py    # MCP server for the knowledge base
 │   ├── requirements.txt
 │   ├── uploads/         # Stored PDFs, one folder per user (created automatically, not in git)
 │   └── .env             # Database password, model settings, API keys (not in git)
 └── frontend/
     ├── app/page.tsx                   # Chat interface, tables, file cards, source chips, documents panel
     ├── app/globals.css                # Colours and small animations
-    └── app/components/AuthModal.tsx   # Login, signup and Google sign-in window
+    ├── app/components/AuthModal.tsx   # Login, signup and Google sign-in window
+    └── app/components/AnswerTrace.tsx # "How this answer was made" panel
 ```
 
 ### API endpoints
@@ -144,6 +159,9 @@ rag-assistant-tool/
 | `POST /upload` | Save a PDF and start reading it in the background (requires login) |
 | `GET /upload/status` | How the background reading is going (one entry per file) |
 | `POST /query` | Ask a question |
+| `GET /gmail/status`, `POST /gmail/connect`, `DELETE /gmail` | Gmail connection: check it, start it, remove it |
+| `GET /gmail/callback` | Where Google sends the user back after allowing Gmail access |
+| `/mcp`, `/gmail-mcp` | The DocQuery and Gmail MCP servers used by the agent |
 | `GET /documents` | List the signed-in user's documents, newest first |
 | `DELETE /documents?name=` | Delete a document and its stored PDF |
 | `GET /documents/file?name=` | Open the stored PDF |
@@ -243,46 +261,20 @@ Open `http://localhost:3000`.
 
 The backend checks the Google token with `google-auth`. An account created with Google has no password, so it signs in with Google only.
 
-### MCP server (optional)
+### Gmail (optional)
 
-The MCP server lets an MCP client (for example Claude Desktop) use your knowledge base. Add it to the client's config, with a login token for your account:
-
-```json
-{
-  "mcpServers": {
-    "docquery": {
-      "command": "path/to/venv/Scripts/python.exe",
-      "args": ["path/to/backend/mcp_server.py"],
-      "env": { "DOCQUERY_ACCESS_TOKEN": "your_jwt_token" }
-    }
-  }
-}
+1. In the same Google Cloud project, enable the **Gmail API**
+2. On the **OAuth consent screen**, add the `gmail.readonly` scope, and while the app is in *Testing*, add each Gmail address that will be used under **Test users** (up to 100)
+3. In the OAuth client, add `http://127.0.0.1:8000/gmail/callback` under *Authorized redirect URIs*, and copy the client secret
+4. Add to `backend/.env`:
 ```
-It provides three tools: `list_my_documents`, `search_documents` and `summarize_document`.
-
-### Run with Docker (optional)
-
-Docker starts the database, backend and frontend together, so nothing has to be installed by hand except Docker Desktop and Ollama.
-
-1. Make sure `backend/.env` exists (it needs at least `DB_PASSWORD`, plus your Groq key if you use Groq)
-2. Start Ollama on your computer if you use it (`ollama serve`; the backend container reaches it through `host.docker.internal`)
-3. From the project folder run:
-
-```bash
-docker compose --env-file backend/.env up --build
+GOOGLE_CLIENT_SECRET=your_google_oauth_client_secret
+GMAIL_REDIRECT_URI=http://127.0.0.1:8000/gmail/callback
+FRONTEND_URL=http://localhost:3000
 ```
+5. Restart the backend and click **Connect Gmail** in the header
 
-4. Open `http://localhost:3000`
-
-The first build is slow because it downloads PyTorch and the embedding model; later starts are fast. The Docker database is separate from a local Postgres, so it starts empty: sign up again and re-upload your documents. Data is kept in Docker volumes (`pgdata`, `uploads`, `models`) and survives restarts; `docker compose down -v` deletes it.
-
-For development inside Docker (code changes reload when you save), add the dev file:
-
-```bash
-docker compose --env-file backend/.env -f docker-compose.yml -f docker-compose.dev.yml up --build
-```
-
-Settings the containers use: `DB_HOST`, `CORS_ORIGINS`, `OLLAMA_HOST` (all set in `docker-compose.yml`) and `NEXT_PUBLIC_API_URL` (the address the browser uses for the backend, set at build time).
+DocQuery only asks for read-only access, so it can never send, change or delete emails. The Google key is stored encrypted. While the Google app is in *Testing*, Google ends the connection after 7 days and it has to be connected again.
 
 ---
 
@@ -310,4 +302,4 @@ Settings the containers use: `DB_HOST`, `CORS_ORIGINS`, `OLLAMA_HOST` (all set i
 - Conversation memory is rule-based and keeps simple facts the user states, not everything said
 - Background reading jobs are kept in memory: if the backend restarts while a file is being read, the file has to be uploaded again
 - Counting questions ("how many times does X appear?") depend on the passages found and may be incomplete
-- The MCP server supports one user token and searches directly, without the agent loop
+- While the Google app is in Testing mode, a Gmail connection lasts 7 days and only listed test users can connect
