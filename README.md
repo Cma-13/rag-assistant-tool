@@ -11,7 +11,7 @@ This project was built to explore document intelligence, information retrieval, 
 ## What it does
 
 **Documents**
-- **Upload** PDF documents (text-based, table-heavy or scanned) with the **+** button, or by dragging them into the page. Up to 10 PDFs at a time
+- **Upload** PDF documents (text-based, table-heavy or scanned, in English or Nepali) with the **+** button, or by dragging them into the page. Up to 10 PDFs at a time
 - **Attach and ask in one message**: attach a PDF and type a question about it; the question is answered from the attached files
 - **Background reading**: a PDF is saved right away and read in the background, so large files never block the app. A file card in the chat shows *Reading…* and changes to *Ready* (or a clear reason if the PDF could not be read)
 - **My documents** panel: open any document, delete it (its stored PDF and all its data are removed), newest first
@@ -56,7 +56,8 @@ PDF Upload  (duplicate check by SHA-256, file stored, answered immediately)
    ▼  background thread (one PDF at a time, the others wait their turn)
 Extraction  ──►  Text layer (PyMuPDF) + tables (pdfplumber);
                  Tesseract OCR only for pages with no text layer
-                 (picture-only pages are read several at a time)
+                 (picture-only pages are read several at a time;
+                 Devanagari pages are read as Nepali + English)
    │
    ▼
 Chunking (LangChain, heading-aware)  ──►  Overlapping segments, split at section headings,
@@ -103,6 +104,8 @@ Every message is classified into one of seven actions before anything else happe
 **Follow-ups and memory.** Short messages made only of follow-up words ("make it shorter", "give me an example then") are recognised and handled before routing. The assistant keeps simple notes of what you told it (rule-based, no extra model call) and the last few turns of the chat, which are sent along with each question.
 
 **Model fallback.** Groq (`openai/gpt-oss-120b`) is used when `LLM_PROVIDER=groq`. If Groq hits a rate limit or errors, search requests fall back to the local Ollama model. Table requests don't fall back (the small model isn't reliable for tables) and show a short "usage limit reached" message.
+
+**Nepali documents.** Before a scanned page is read, Tesseract checks which script it is written in. Devanagari pages are read with Nepali + English (Nepali documents often contain English words, emails and numbers); all other pages are read in English only, so English documents are not affected. Pages typed in old Nepali fonts such as Preeti, whose text layer reads as `g]kfn` instead of `नेपाल`, are read with OCR instead of from the text layer. Keyword search also understands Nepali words and their endings (a question about `विद्यार्थी` also finds `विद्यार्थीहरूको`). The answer trace shows which pages were read as Nepali.
 
 **Background reading.** `POST /upload` saves the file and returns at once. A background thread reads it (one PDF at a time, the others queue). The page checks the status until the file is ready or has failed. The jobs are kept in memory, so a file that is still being read when the backend restarts has to be uploaded again.
 
@@ -176,7 +179,7 @@ rag-assistant-tool/
 - Python 3.10+
 - Node.js 18+
 - PostgreSQL 15+ with the [pgvector](https://github.com/pgvector/pgvector) extension installed
-- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) installed and on your system PATH
+- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) installed and on your system PATH, with the **Nepali** (`nep`) and **OSD** (`osd`) language data for Nepali documents (check with `tesseract --list-langs`). Without them, every page is read in English
 - [Ollama](https://ollama.com) installed, with the `llama3.2:3b` model pulled (used locally and as the fallback):
   ```bash
   ollama pull llama3.2:3b
@@ -202,6 +205,7 @@ GROQ_MODEL=openai/gpt-oss-120b
 JWT_SECRET_KEY=a_long_random_secret_string
 GOOGLE_CLIENT_ID=your_google_oauth_client_id.apps.googleusercontent.com
 OCR_WORKERS=4                # optional: how many picture-only pages are read at the same time
+NEPALI_OCR=1                 # optional: 0 reads every scanned page in English only
 ```
 Login tokens are valid for 7 days. `OCR_WORKERS` defaults to the number of CPU cores, up to 4.
 
@@ -296,7 +300,7 @@ DocQuery only asks for read-only access, so it can never send, change or delete 
 
 ## Known limitations
 
-- Scanned (image-only) PDFs depend on OCR, which can misread digits. Text-based PDFs are read exactly. Picture-only pages in a very large PDF take longer to read
+- Scanned (image-only) PDFs depend on OCR, which can misread digits. Nepali OCR can misread some joined letters, and very short Nepali pages may be read as English. Text-based PDFs are read exactly. Picture-only pages in a very large PDF take longer to read
 - Very long tables can lose rows, and rows split across a page break may be read as two rows
 - Groq's free tier has limits (about 8,000 tokens per minute and 200,000 per day). When reached, search answers come from the smaller local model and table requests are unavailable until the limit resets
 - Conversation memory is rule-based and keeps simple facts the user states, not everything said
