@@ -5,9 +5,10 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/models
 
-# Tesseract is the OCR program used for picture-only PDF pages (English data comes with it)
+# Tesseract is the OCR program used for picture-only PDF pages (English and script-detection
+# data come with it; the Nepali data is added for Devanagari pages)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tesseract-ocr \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-nep \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
