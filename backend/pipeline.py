@@ -127,9 +127,98 @@ OCR_TARGET_WIDTH_PX = 2400
 OCR_WORKERS = max(1, int(os.getenv("OCR_WORKERS", min(4, os.cpu_count() or 1))))
 
 
-def _ocr_png(png_bytes, lang):
-    """Read the text on one page picture."""
-    return pytesseract.image_to_string(Image.open(io.BytesIO(png_bytes)), lang=lang)
+# Nepali (Devanagari) pages. A scanned page is read in English unless it is written in
+# Devanagari; then it is read with Nepali + English (Nepali documents often contain English
+# words, emails and numbers). Turning Nepali on for every page put stray Devanagari letters
+# into English documents, so each page's script is checked first.
+# Needs Tesseract's nep and osd language files; without them every page is read in English,
+# as before. NEPALI_OCR=0 in .env turns Nepali reading off.
+NEPALI_OCR = os.getenv("NEPALI_OCR", "1").strip() != "0"
+_nepali_ready = None
+_DEVANAGARI_LETTER = re.compile(r"[\u0900-\u097F]")
+_LATIN_LETTER = re.compile(r"[A-Za-z]")
+
+# Old Nepali fonts draw Devanagari letters with ordinary English letter codes, so the text
+# layer of such a page reads "g]kfn ;/sf/" instead of "नेपाल सरकार". These pages are read
+# with OCR instead of from their text layer.
+_LEGACY_NEPALI_FONTS = ("preeti", "kantipur", "sagarmatha", "himalb", "ganess", "kanchan",
+                        "aakriti", "fontasy", "pcs nepali", "shangrila")
+
+
+def nepali_ocr_ready():
+    """True when Nepali pages can be read: turned on and Tesseract has nep and osd."""
+    global _nepali_ready
+    if _nepali_ready is None:
+        if not NEPALI_OCR:
+            _nepali_ready = False
+        else:
+            try:
+                installed = set(pytesseract.get_languages(config=""))
+            except Exception:
+                installed = set()
+            missing = sorted({"nep", "osd"} - installed)
+            _nepali_ready = not missing
+            if missing:
+                print(f"OCR: Nepali pages will be read as English: Tesseract is missing "
+                      f"{', '.join(m + '.traineddata' for m in missing)}")
+    return _nepali_ready
+
+
+def _page_script(image):
+    """The script a page is written in ("Devanagari", "Latin", ...) as Tesseract sees it, or
+    None when there is too little text to tell. A half-size copy is enough and twice as fast."""
+    small = image.copy()
+    small.thumbnail((1200, 2400))
+    try:
+        found = pytesseract.image_to_osd(small, config="--psm 0")
+    except pytesseract.TesseractError:  # "Too few characters"
+        return None
+    match = re.search(r"Script: (\w+)", found)
+    return match.group(1) if match else None
+
+
+# A dotted line for a signature ("..........") comes out of Nepali OCR as a long run of
+# 0s and 9s, like "00009909900000900000900900%5"; no real number looks like that.
+_DOTTED_LINE = re.compile(r"(?<![\w.])[09.%]{6,}[0-9%]*(?![\w.])")
+
+
+def _drop_dotted_lines(text):
+    def junk(run):  # long enough, or with a stray % in it, so a real account number is never dropped
+        return run.count("0") + run.count("9") >= 12 and (len(run) >= 20 or "%" in run)
+    return _DOTTED_LINE.sub(lambda m: "" if junk(m.group(0)) else m.group(0), text)
+
+
+def _ocr_png(png_bytes):
+    """Read the text on one page picture. Returns (text, True if it was read as Nepali)."""
+    image = Image.open(io.BytesIO(png_bytes))
+    if not nepali_ocr_ready():
+        return pytesseract.image_to_string(image, lang="eng"), False
+    script = _page_script(image)
+    if script == "Devanagari":
+        return _drop_dotted_lines(pytesseract.image_to_string(image, lang="nep+eng")), True
+    if script is not None:
+        return pytesseract.image_to_string(image, lang="eng"), False
+    # Too little text to tell: read it with both, and keep that only if it really is Nepali
+    text = pytesseract.image_to_string(image, lang="nep+eng")
+    nepali, english = len(_DEVANAGARI_LETTER.findall(text)), len(_LATIN_LETTER.findall(text))
+    if nepali >= 5 and nepali >= english:
+        return _drop_dotted_lines(text), True
+    return pytesseract.image_to_string(image, lang="eng"), False
+
+
+def _uses_legacy_nepali_font(page):
+    """True if most of the page's text is in an old Nepali font such as Preeti."""
+    if not any(name in font[3].lower() for font in page.get_fonts() for name in _LEGACY_NEPALI_FONTS):
+        return False  # quick check of the page's font list first; most pages stop here
+    total = legacy = 0
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            for span in line["spans"]:
+                n = len(span["text"].strip())
+                total += n
+                if any(name in span["font"].lower() for name in _LEGACY_NEPALI_FONTS):
+                    legacy += n
+    return total > 0 and legacy * 2 >= total
 
 
 def _page_text_outside_tables(page, boxes):
@@ -187,10 +276,10 @@ def _clean_extracted_text(text):
     return _UTF16_RUN.sub(decode, text).replace("\x00", "")
 
 
-def ocr_pdf(pdf_path, lang="eng", stats=None):
+def ocr_pdf(pdf_path, stats=None):
     """Read a scanned PDF (pages that are only images) by recognising the text with OCR.
     If `stats` (a dict) is given, it is filled with how each page was read:
-    pages, text_pages, ocr_pages and table_pages (page numbers start at 1), tables."""
+    pages, text_pages, ocr_pages, nepali_pages and table_pages (page numbers start at 1), tables."""
     doc = fitz.open(pdf_path)
     full_text = ""
 
@@ -221,6 +310,12 @@ def ocr_pdf(pdf_path, lang="eng", stats=None):
     with ThreadPoolExecutor(max_workers=OCR_WORKERS) as pool:
         for page_num, page in enumerate(doc):
             has_text_layer = bool(page.get_text().strip())
+            if has_text_layer and _uses_legacy_nepali_font(page) and nepali_ocr_ready():
+                # its text layer is unreadable (old Nepali font): read the page as a picture,
+                # and drop its tables, whose cells hold the same unreadable letters
+                has_text_layer = False
+                tables_by_page.pop(page_num, None)
+                boxes_by_page.pop(page_num, None)
             native_text = _page_text_outside_tables(page, boxes_by_page.get(page_num, []))
 
             if stats is not None:
@@ -238,7 +333,7 @@ def ocr_pdf(pdf_path, lang="eng", stats=None):
                 pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
                 # Default page-segmentation mode: it also reads light text on
                 # coloured bands (table headers, footers), which --psm 6 skipped.
-                text = pool.submit(_ocr_png, pix.tobytes("png"), lang)
+                text = pool.submit(_ocr_png, pix.tobytes("png"))
                 pending.append(text)
                 if len(pending) >= OCR_WORKERS * 2:
                     pending.pop(0).result()  # wait for the oldest, so pictures do not pile up in memory
@@ -256,13 +351,16 @@ def ocr_pdf(pdf_path, lang="eng", stats=None):
         stats["pages"] = len(page_parts)
         stats.setdefault("text_pages", [])
         stats.setdefault("ocr_pages", [])
+        stats["nepali_pages"] = []
         stats["table_pages"] = sorted(p + 1 for p in tables_by_page)
         stats["tables"] = sum(len(t) for t in tables_by_page.values())
 
     full_text = ""
     for page_num, text, table_text in page_parts:
         if isinstance(text, Future):
-            text = text.result()
+            text, nepali = text.result()
+            if nepali and stats is not None:
+                stats["nepali_pages"].append(page_num + 1)
         full_text += f"\n--- Page {page_num + 1} ---\n{text}{table_text}"
 
     return _clean_extracted_text(full_text)
@@ -378,6 +476,8 @@ def _ensure_document_info():
                 created_at TIMESTAMP DEFAULT NOW(),
                 PRIMARY KEY (user_id, source_file)
             )""")
+        # added with Nepali OCR: which scanned pages were read as Nepali
+        cur.execute("ALTER TABLE document_info ADD COLUMN IF NOT EXISTS nepali_pages INTEGER[]")
     _DOCUMENT_INFO_READY = True
 
 
@@ -386,13 +486,15 @@ def save_document_info(source_file, user_id, stats):
     _ensure_document_info()
     with db_cursor(commit=True) as cur:
         cur.execute(
-            """INSERT INTO document_info (user_id, source_file, pages, text_pages, ocr_pages, table_pages, tables)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """INSERT INTO document_info (user_id, source_file, pages, text_pages, ocr_pages, nepali_pages,
+                                          table_pages, tables)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (user_id, source_file) DO UPDATE SET
                  pages = EXCLUDED.pages, text_pages = EXCLUDED.text_pages, ocr_pages = EXCLUDED.ocr_pages,
-                 table_pages = EXCLUDED.table_pages, tables = EXCLUDED.tables, created_at = NOW()""",
+                 nepali_pages = EXCLUDED.nepali_pages, table_pages = EXCLUDED.table_pages,
+                 tables = EXCLUDED.tables, created_at = NOW()""",
             (user_id, source_file, stats.get("pages"), stats.get("text_pages", []), stats.get("ocr_pages", []),
-             stats.get("table_pages", []), stats.get("tables", 0)))
+             stats.get("nepali_pages", []), stats.get("table_pages", []), stats.get("tables", 0)))
 
 
 def forget_document_info(source_file, user_id):
@@ -405,13 +507,14 @@ def _document_info(source_file, user_id):
     """The saved page details of a document, or None for files uploaded before they were saved."""
     _ensure_document_info()
     with db_cursor() as cur:
-        cur.execute("""SELECT pages, text_pages, ocr_pages, table_pages, tables FROM document_info
+        cur.execute("""SELECT pages, text_pages, ocr_pages, table_pages, tables, nepali_pages FROM document_info
                        WHERE user_id = %s AND source_file = %s""", (user_id, source_file))
         row = cur.fetchone()
     if not row:
         return None
-    pages, text_pages, ocr_pages, table_pages, tables = row
+    pages, text_pages, ocr_pages, table_pages, tables, nepali_pages = row
     return {"pages": pages, "text_pages": text_pages or [], "ocr_pages": ocr_pages or [],
+            "nepali_pages": nepali_pages or [],
             "table_pages": table_pages or [], "tables": tables or 0}
 
 
@@ -430,12 +533,49 @@ def store_chunks(source_file, chunks, embeddings, content_hash, user_id, pages=N
             )
 
 
+# Nepali words a question is full of but that say nothing about what is wanted
+# (Postgres only knows English stop words).
+_NEPALI_STOPWORDS = {
+    "के", "को", "का", "की", "हो", "छ", "छन्", "र", "मा", "ले", "लाई", "बाट", "पनि", "यो", "त्यो",
+    "कति", "कुन", "कसले", "कसको", "कहाँ", "कहिले", "किन", "कसरी", "गर्नुहोस्", "भन्नुहोस्", "दिनुहोस्",
+    "थियो", "भएको", "गरेको", "एक", "यस", "उक्त", "तथा", "वा", "नै", "हुन्", "हुन्छ",
+}
+# Endings joined to Nepali words ("विद्यार्थीहरूको" = विद्यार्थी + हरू + को). They are cut off the
+# question's words, which are then matched as word beginnings, so "विद्यार्थीको" finds
+# "विद्यार्थीहरूलाई" too.
+_NEPALI_ENDINGS = ("हरूलाई", "हरूको", "हरूले", "हरूमा", "हरूबाट", "हरू", "लाई", "बाट", "सँग",
+                   "देखि", "सम्म", "भित्र", "को", "का", "की", "ले", "मा")
+_QUESTION_WORD = re.compile(r"[A-Za-z0-9]+|[\u0900-\u0963\u0966-\u097F]+")  # not the danda ।
+
+
+def _written_in_nepali(text):
+    """True if the text is mostly Devanagari letters (a question asked in Nepali)."""
+    nepali = len(_DEVANAGARI_LETTER.findall(text or ""))
+    return nepali >= 3 and nepali > len(_LATIN_LETTER.findall(text or ""))
+
+
+def _nepali_stem(word):
+    for ending in _NEPALI_ENDINGS:
+        if word.endswith(ending) and len(word) - len(ending) >= 2:
+            return word[: -len(ending)]
+    return word
+
+
 def _keyword_query(text):
     """Turn a question into an OR-style keyword query, e.g.
     'What languages does Ramesh speak?' -> 'what | languages | does | ramesh | speak'.
-    Postgres drops common stop words (what, does...) itself."""
-    words = re.findall(r"[A-Za-z0-9]+", text.lower())
-    words = [w for w in words if len(w) > 2]
+    Postgres drops common stop words (what, does...) itself. Nepali words are kept too,
+    without their endings and matched as word beginnings ('विद्यार्थी:*')."""
+    words = []
+    for w in _QUESTION_WORD.findall(text.lower()):
+        if _DEVANAGARI_LETTER.match(w):
+            if w in _NEPALI_STOPWORDS:
+                continue
+            stem = _nepali_stem(w)
+            if len(stem) >= 2 and stem not in _NEPALI_STOPWORDS:
+                words.append(stem + ":*")
+        elif len(w) > 2:
+            words.append(w)
     return " | ".join(dict.fromkeys(words))
 
 
@@ -1769,9 +1909,20 @@ Rules you must follow:
 9. Answer only if the search results directly state the thing asked about. Do not guess from related details: a phone number of the seller is not the buyer's, and a black telephone does not tell you the colour of a door. Do not work out a fact from other facts either: if the results only mention something in passing (for example inside an address), they do not answer a question about it. If the results don't say it in words, or are about a different person, company or thing than the one asked about, say you couldn't find it.
 10. If the user asks how many items or rows there are and that number is not written in the results, say it isn't stated - do not count them yourself.
 11. Write currency exactly as it appears in the results (for example Rs. or NPR); never change it to another symbol such as the rupee sign or a dollar sign.
-12. Every search result starts with a passage number such as [P3]. Always write your answer for the user first, in full sentences - even when the results don't answer the question, write a short sentence saying so. Then add one last line in exactly this form: SOURCES: P3, P7 - listing only the passages your answer uses, or SOURCES: none if the results don't answer the question. Do not write passage numbers anywhere else."""
+12. Every search result starts with a passage number such as [P3]. Always write your answer for the user first, in full sentences - even when the results don't answer the question, write a short sentence saying so. Then add one last line in exactly this form: SOURCES: P3, P7 - listing only the passages your answer uses, or SOURCES: none if the results don't answer the question. Do not write passage numbers anywhere else.
+13. The documents may be written in English or in Nepali. If a search finds nothing relevant, search again with the query translated into the other language (for example "water supply stopped" -> "खानेपानी वितरण बन्द", or "छात्रवृत्ति" -> "scholarship") before saying you couldn't find it.
+14. Answer in the language the user wrote the question in. Keep names, numbers, dates and amounts exactly as they are written in the documents."""
+    # The model otherwise tends to keep the language of the earlier answers in the chat,
+    # so it is told which language this question is in.
+    if _written_in_nepali(query):
+        system_prompt += ("\n\nThe user's question is written in Nepali, so write your answer in Nepali "
+                          "(unless the question asks for another language).")
+    elif any(_written_in_nepali(turn.get("answer", "")) for turn in (history or [])[-2:]):
+        system_prompt += ("\n\nThe user's question is written in English, so write your whole answer in English, "
+                          "even though earlier answers were in Nepali (unless the question asks for another "
+                          "language). Names from the documents may stay as they are written.")
     if elaborate:
-        system_prompt += "\n13. " + (elaborate if isinstance(elaborate, str) else _MORE_DETAIL)
+        system_prompt += "\n15. " + (elaborate if isinstance(elaborate, str) else _MORE_DETAIL)
     if notes:
         system_prompt += ("\n\nThings the user told you earlier in this chat (about themselves - use them only if they help, "
                           "and never as a source of facts about the documents):\n- " + "\n- ".join(notes))
@@ -2119,6 +2270,7 @@ def _trace_documents(docs, user_id):
             }
             if info:
                 detail.update(pages=info["pages"], text_pages=info["text_pages"], ocr_pages=info["ocr_pages"],
+                              nepali_pages=info["nepali_pages"],
                               table_pages=info["table_pages"], tables=info["tables"], recorded=True)
             else:
                 detail.update(pages=last_page, recorded=False)
