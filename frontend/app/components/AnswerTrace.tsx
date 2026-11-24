@@ -354,6 +354,7 @@ function DocumentDetail({ detail: d }: { detail: Record<string, unknown> }) {
   const textPages = (d.text_pages as number[] | undefined) ?? [];
   const ocrPages = (d.ocr_pages as number[] | undefined) ?? [];
   const tablePages = (d.table_pages as number[] | undefined) ?? [];
+  const nepaliPages = (d.nepali_pages as number[] | undefined) ?? [];
   const tables = Number(d.tables ?? 0);
 
   let reading: string;
@@ -372,6 +373,14 @@ function DocumentDetail({ detail: d }: { detail: Record<string, unknown> }) {
     ["Pages", d.pages ? String(d.pages) : "unknown"],
     ["How pages were read", reading],
   ];
+  if (nepaliPages.length) {
+    rows.push([
+      "OCR language",
+      nepaliPages.length === ocrPages.length
+        ? "Nepali + English (Devanagari script found)"
+        : `Nepali + English on page ${pageRanges(nepaliPages)}; English on the other scanned pages`,
+    ]);
+  }
   if (d.recorded) {
     rows.push([
       "Tables found",
