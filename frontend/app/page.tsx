@@ -511,6 +511,7 @@ export default function Home() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authMode, setAuthMode] = useState<"login" | "signup">("login");
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false); // "Clear chat" asks once before deleting
   const [showDocs, setShowDocs] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deletingDoc, setDeletingDoc] = useState<string | null>(null);
@@ -1506,6 +1507,7 @@ export default function Home() {
             <button
               onClick={() => {
                 setShowUserMenu((prev) => !prev);
+                setConfirmClear(false);
                 setShowDocs(false);
                 setShowGmail(false);
                 setConfirmDelete(null);
@@ -1523,15 +1525,36 @@ export default function Home() {
                 <p className="mb-1.5 truncate border-b border-[#EFEBE4] px-4 pb-2.5 text-[13px] font-medium text-[#1C1C1E]">
                   {userEmail}
                 </p>
-                <button
-                  onClick={() => {
-                    setShowUserMenu(false);
-                    handleClearChat();
-                  }}
-                  className="w-full px-4 py-2 text-left text-[13px] text-[#1C1C1E] transition hover:bg-[#F7F5F0]"
-                >
-                  Clear chat
-                </button>
+                {confirmClear ? (
+                  <div className="px-4 py-2">
+                    <p className="text-[12.5px] leading-snug text-[#1C1C1E]">Delete all messages in this chat?</p>
+                    <div className="mt-2 flex items-center gap-1.5">
+                      <button
+                        onClick={() => {
+                          setConfirmClear(false);
+                          setShowUserMenu(false);
+                          handleClearChat();
+                        }}
+                        className="rounded-md bg-red-600 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-red-700"
+                      >
+                        Clear
+                      </button>
+                      <button
+                        onClick={() => setConfirmClear(false)}
+                        className="rounded-md border border-[#E6E0D2] px-2.5 py-1 text-[12px] text-[#6B6B6B] hover:bg-[#F7F5F0]"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setConfirmClear(true)}
+                    className="w-full px-4 py-2 text-left text-[13px] text-[#1C1C1E] transition hover:bg-[#F7F5F0]"
+                  >
+                    Clear chat
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     setShowUserMenu(false);
