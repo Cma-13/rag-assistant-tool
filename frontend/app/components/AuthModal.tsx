@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { GoogleOAuthProvider, GoogleLogin } from "@react-oauth/google";
 import { API_URL } from "../config";
 
@@ -181,13 +181,28 @@ export default function AuthModal({ onClose, onAuthSuccess, initialMode = "login
       bad ? "border-red-400 focus:border-red-400" : "border-[#E6E0D2] hover:border-[#D6CFBF] focus:border-[#5E7C5C]"
     }`;
 
+  // Esc closes the window, like the other pop-ups (not while signing in)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !loading) onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [loading, onClose]);
+
   const switchMode = (next: "login" | "signup") => {
     setMode(next);
     setError("");
   };
 
   return (
-    <div className="auth-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#1C1C1E]/40 px-4 py-6 backdrop-blur-[3px]">
+    <div
+      className="auth-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#1C1C1E]/40 px-4 py-6 backdrop-blur-[3px]"
+      // a click on the dimmed background (not inside the window) closes it
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !loading) onClose();
+      }}
+    >
       <div
         role="dialog"
         aria-modal="true"
