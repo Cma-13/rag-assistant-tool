@@ -59,6 +59,7 @@ interface UploadItem {
 }
 
 const MAX_ATTACHMENTS = 10;
+const MAX_QUESTION_LENGTH = 4000; // the backend accepts questions up to this length
 
 // Numbers (with commas, decimals, %) line up on the right in tables.
 const NUMERIC_CELL = /^[-+]?[\d,]*\.?\d+%?$/;
@@ -545,15 +546,6 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  useEffect(() => {
-    if (!token) return;
-    fetch(`${API_URL}/documents`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then((res) => res.json())
-      .then((data) => setUploadedDocs(data.documents ?? []))
-      .catch(() => {});
-  }, [token]);
 
   useEffect(() => {
     tokenRef.current = token;
@@ -741,6 +733,24 @@ export default function Home() {
     ]);
   };
 
+  // Your documents, loaded whenever the login changes
+  useEffect(() => {
+    if (!token) return;
+    fetch(`${API_URL}/documents`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((res) => {
+        // the server no longer accepts this login (for example the secret key was changed)
+        if (res.status === 401) {
+          handleSessionExpired();
+          return null;
+        }
+        return res.json();
+      })
+      .then((data) => data && setUploadedDocs(data.documents ?? []))
+      .catch(() => {});
+  }, [token]);
+
   const handleDeleteDocument = async (name: string) => {
     if (!token || isTokenExpired(token)) {
       setConfirmDelete(null);
@@ -855,6 +865,22 @@ export default function Home() {
         }),
       });
       const data = await res.json();
+      if (!res.ok || typeof data.answer !== "string") {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content:
+              typeof data.detail === "string" ? data.detail : "Sorry, something went wrong. Please try again.",
+          },
+        ]);
+        return;
+      }
+      if (token && data.action_taken === "AUTH_REQUIRED") {
+        // logged in here, but the server did not accept the login
+        handleSessionExpired();
+        return;
+      }
       setMessages((prev) => [
         ...prev,
         {
@@ -900,6 +926,10 @@ export default function Home() {
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
       });
+      if (res.status === 401) {
+        handleSessionExpired();
+        return { error: "Please log in again to upload." };
+      }
       const data = await res.json();
       if (!res.ok || !data.filename) {
         return { error: data.detail ?? `I couldn't process "${file.name}".` };
@@ -1156,7 +1186,26 @@ export default function Home() {
         { role: "assistant", content: "Only PDF files are supported. Please attach a valid PDF." },
       ]);
     }
-    setAttachments((prev) => [...prev, ...pdfs].slice(0, MAX_ATTACHMENTS));
+    // the same file picked twice is attached once
+    const known = new Set(attachments.map((f) => `${f.name}|${f.size}`));
+    const fresh = pdfs.filter((f) => {
+      const key = `${f.name}|${f.size}`;
+      if (known.has(key)) return false;
+      known.add(key);
+      return true;
+    });
+    const room = Math.max(MAX_ATTACHMENTS - attachments.length, 0);
+    if (fresh.length > room) {
+      const left = fresh.length - room;
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `You can attach up to ${MAX_ATTACHMENTS} PDFs at once, so ${left} ${left === 1 ? "file was" : "files were"} left out. Send these first, then attach the rest.`,
+        },
+      ]);
+    }
+    setAttachments([...attachments, ...fresh.slice(0, room)]);
     inputRef.current?.focus();
   };
 
@@ -1633,7 +1682,7 @@ export default function Home() {
                         </span>
                       </button>
                     ))}
-                    <div className="max-w-full rounded-2xl rounded-br-sm bg-[#5E7C5C] px-4 py-3 text-[14.5px] leading-relaxed text-white shadow-sm">
+                    <div className="max-w-full rounded-2xl rounded-br-sm bg-[#5E7C5C] px-4 py-3 text-[14.5px] leading-relaxed text-white shadow-sm [overflow-wrap:anywhere]">
                       {renderContent(msg.content)}
                     </div>
                   </div>
@@ -1643,7 +1692,7 @@ export default function Home() {
                     msg.structured || parseBlocks(msg.content).some((b) => b.kind === "table")
                       ? "w-full min-w-0 max-w-full"
                       : "max-w-[80%]"
-                  } rounded-2xl px-4 py-3 text-[14.5px] leading-[1.65] shadow-sm ${
+                  } rounded-2xl px-4 py-3 text-[14.5px] leading-[1.65] shadow-sm [overflow-wrap:anywhere] ${
                     msg.role === "user"
                       ? "rounded-br-sm bg-[#5E7C5C] text-white"
                       : "rounded-bl-sm border border-[#E9E4DA] bg-white text-[#1C1C1E]"
@@ -1800,8 +1849,10 @@ export default function Home() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) =>
-                  e.key === "Enter" && !e.shiftKey && handleSend()
+                  // not while a Nepali (or other) keyboard is still composing a word
+                  e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && handleSend()
                 }
+                maxLength={MAX_QUESTION_LENGTH}
                 placeholder={
                   loading
                     ? "Waiting for the previous answer…"
@@ -1811,7 +1862,7 @@ export default function Home() {
                         ? "Type your question…"
                         : "Type a message, or attach a PDF with +"
                 }
-                className="flex-1 bg-transparent py-1.5 text-[14.5px] text-[#1C1C1E] placeholder-[#B0ABA2] outline-none disabled:cursor-not-allowed"
+                className="min-w-0 flex-1 bg-transparent py-1.5 text-[14.5px] text-[#1C1C1E] placeholder-[#B0ABA2] outline-none disabled:cursor-not-allowed"
               />
               <button
                 onClick={handleSend}
