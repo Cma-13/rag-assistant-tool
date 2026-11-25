@@ -254,6 +254,9 @@ def upload_status(ids: str | None = None, current_user: dict = Depends(get_curre
     return {"jobs": ingest.jobs_status(current_user["user_id"], wanted)}
 
 
+MAX_QUESTION_LENGTH = 4000  # longer messages are not sent to the AI (the chat box stops at this length too)
+
+
 class QueryRequest(BaseModel):
     question: str
     source_file: str | None = None  # optional — omit to search the whole knowledge base
@@ -266,6 +269,10 @@ class QueryRequest(BaseModel):
 @app.post("/query")
 def query_documents(request: QueryRequest, current_user: dict | None = Depends(get_optional_user)):
     user_id = current_user["user_id"] if current_user else None
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="Please type a question.")
+    if len(request.question) > MAX_QUESTION_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Your question is too long. Please keep it under {MAX_QUESTION_LENGTH:,} characters.")
     scope = request.source_files or request.source_file
     try:
         result = agent_query(request.question, user_id, source_file=scope, history=request.history,
@@ -382,7 +389,7 @@ def get_document_file(name: str, current_user: dict = Depends(get_current_user))
         row = cur.fetchone()
 
     if not row:
-        raise HTTPException(status_code=404, detail="Document not found.")
+        raise HTTPException(status_code=404, detail=f"\"{name}\" is no longer in your documents (it may have been deleted).")
 
     path = ingest.pdf_path(user_id, row[0]) if row[0] else None
     if not path or not os.path.exists(path):
