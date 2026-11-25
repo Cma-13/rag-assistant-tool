@@ -489,10 +489,19 @@ function EmailCards({
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+
+  // The message box grows with the text (long messages wrap onto new lines) up to about
+  // 8 lines, then scrolls inside; it shrinks back to one line once the message is sent.
+  useEffect(() => {
+    const box = inputRef.current;
+    if (!box) return;
+    box.style.height = "auto"; // empty: one line (its natural size)
+    if (input) box.style.height = `${Math.min(box.scrollHeight, 200)}px`;
+  }, [input]);
   const [loading, setLoading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const [uploadedDocs, setUploadedDocs] = useState<string[]>([]);
   const watchedJobs = useRef<Set<string>>(new Set()); // upload jobs already being followed
   const tokenRef = useRef<string | null>(null); // always the current login token
@@ -1812,7 +1821,7 @@ export default function Home() {
                   ))}
                 </div>
               )}
-              <div className="flex items-center gap-2">
+              <div className="flex items-end gap-2">
               <label
                 title={
                   attachments.length >= MAX_ATTACHMENTS
@@ -1839,19 +1848,23 @@ export default function Home() {
                 />
                 <PlusIcon />
               </label>
-              <input
+              <textarea
                 ref={inputRef}
-                type="text"
+                rows={1}
                 name="chat-message"
                 autoComplete="off"
                 data-lpignore="true"
                 data-form-type="other"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) =>
-                  // not while a Nepali (or other) keyboard is still composing a word
-                  e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && handleSend()
-                }
+                onKeyDown={(e) => {
+                  // Enter sends, Shift+Enter starts a new line; nothing happens while a
+                  // Nepali (or other) keyboard is still composing a word
+                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
                 maxLength={MAX_QUESTION_LENGTH}
                 placeholder={
                   loading
@@ -1862,7 +1875,7 @@ export default function Home() {
                         ? "Type your question…"
                         : "Type a message, or attach a PDF with +"
                 }
-                className="min-w-0 flex-1 bg-transparent py-1.5 text-[14.5px] text-[#1C1C1E] placeholder-[#B0ABA2] outline-none disabled:cursor-not-allowed"
+                className="max-h-[200px] min-w-0 flex-1 resize-none overflow-y-auto bg-transparent py-1.5 text-[14.5px] leading-6 text-[#1C1C1E] placeholder-[#B0ABA2] outline-none [overflow-wrap:anywhere] disabled:cursor-not-allowed"
               />
               <button
                 onClick={handleSend}
