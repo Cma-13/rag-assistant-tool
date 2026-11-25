@@ -1,11 +1,5 @@
 # DocQuery
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.142-009688?logo=fastapi&logoColor=white)
-![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
-
 DocQuery is a document question-answering assistant built on Retrieval-Augmented Generation (RAG). Upload PDF documents and ask questions in plain language: answers are generated only from your documents, and every answer links to the document and page it came from.
 
 An AI agent decides how to handle each message and calls its tools through MCP (Model Context Protocol) servers, one for document search and one for an optional read-only Gmail connection.
