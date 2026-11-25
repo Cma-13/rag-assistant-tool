@@ -1,113 +1,161 @@
-# Document Query Tool
+# DocQuery
 
-A document intelligence and question-answering system built with Retrieval-Augmented Generation (RAG). Upload PDF documents and ask natural-language questions across all of them. Answers are generated using only the content of your documents, and every answer shows which document and which page it came from. Table and key-detail requests are returned as clean tables.
+**Ask questions about your PDFs and get answers that point to the exact page they came from.**
 
-The language model can run locally (Ollama) or on Groq, with an automatic fallback to the local model when Groq is unavailable.
+DocQuery is a document question-answering assistant built on Retrieval-Augmented Generation (RAG). Upload PDF documents (text-based, scanned, table-heavy, in English or Nepali) and ask questions in your own words across all of them. Answers come only from your documents, every answer shows its sources with page numbers, and each answer can show step by step how it was found.
 
-This project was built to explore document intelligence, information retrieval, RAG, and AI agent architectures (tool calling and MCP) end-to-end.
+An AI agent decides how to handle each message and reaches its tools through MCP servers: one for document search and one for an optional, read-only Gmail connection. The language model runs on Groq, with an automatic fallback to a local Ollama model.
+
+Built as a final-year internship project at Treeleaf Technologies to explore document intelligence, information retrieval, RAG and AI agent architectures (tool calling and MCP) end to end.
 
 ---
 
-## What it does
+## Contents
 
-**Documents**
-- **Upload** PDF documents (text-based, table-heavy or scanned, in English or Nepali) with the **+** button, or by dragging them into the page. Up to 10 PDFs at a time
-- **Attach and ask in one message**: attach a PDF and type a question about it; the question is answered from the attached files
-- **Background reading**: a PDF is saved right away and read in the background, so large files never block the app. A file card in the chat shows *Reading…* and changes to *Ready* (or a clear reason if the PDF could not be read)
-- **My documents** panel: open any document, delete it (its stored PDF and all its data are removed), newest first
-- **Stored PDFs**: the original PDF is kept, so a source can be opened from the chat at the exact page
+- [Highlights](#highlights)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Tech stack](#tech-stack)
+- [Project structure](#project-structure)
+- [Getting started](#getting-started)
+  - [Option A: Docker](#option-a-docker)
+  - [Option B: Run locally](#option-b-run-locally)
+  - [Environment variables](#environment-variables)
+  - [Google sign-in (optional)](#google-sign-in-optional)
+  - [Gmail (optional)](#gmail-optional)
+- [Usage](#usage)
+- [API reference](#api-reference)
+- [Security and privacy](#security-and-privacy)
+- [Known limitations](#known-limitations)
 
-**Questions and answers**
-- **Ask questions** across all your uploaded documents and get grounded answers with **source chips showing the document and page numbers** (for example `report.pdf · p. 4, 7`). Clicking a chip opens the PDF at that page
-- **Extract tables and key details** ("show the full invoice as a table", "items with quantity above 100"), view them as tables, copy them or download as CSV
-- **List** your uploaded documents
-- **Summarize** one document, or get a short **overview** of several documents
-- **"These documents I just uploaded"**: the assistant knows which files were added last, so a request about "these two documents" or "the file I just uploaded" covers only those files
-- Refuses to answer (rather than guess) when a question isn't covered by the documents
+---
 
-**Conversation**
-- **Chat naturally**: greetings and small talk are handled without unnecessary document lookups
-- **Conversation memory** within the saved chat: small details you state ("I am Seema", "my project is RAG") are remembered and used in later replies, and questions about the conversation itself ("what are we talking about?") are answered from the chat
-- **Follow-up questions** are understood. "Make it shorter", "in simple words", "as bullet points" reword the last answer, while "make it longer" and "give an example" search the last real question again for a fuller answer or a concrete example
-- **Chat history is saved on the server** for each user, so it comes back on any device, with a **Clear chat** button
+## Highlights
 
-**Accounts**
-- **Sign up and log in** with email and password, or **continue with Google**
-- Each user only sees their own documents and chat
+- **Grounded answers with page-level sources**: click a source to open the PDF at that page
+- **Hybrid search**: meaning-based (vector) and keyword search merged, so paraphrases and exact numbers or IDs are both found
+- **Agentic search**: the model can search several times, once per document, before answering, and says so when the documents don't answer the question
+- **Nepali support**: scanned Nepali pages are read with Nepali OCR, old Preeti-font PDFs are handled, and questions can be asked and answered in Nepali or English
+- **Tables and key details** extracted exactly as written, with copy and CSV download
+- **MCP inside the app**: document search and Gmail are MCP servers that the chat's agent connects to
+- **Answer trace**: "How this answer was found" shows the intent, the searches, the passages used, the tools called and the time each step took
 
-**Gmail (optional)**
-- **Connect Gmail** (read-only) from the header, then ask about your emails in the chat: "emails from Ashok this week", "read the latest invoice email"
-- Emails found are shown as **email cards** under the answer, with dates in your own time zone
-- **Import a PDF attachment** into your documents ("import the PDF from that email"), then ask questions about it like any uploaded file
+---
 
-**Other**
-- **MCP inside the app**: the chat's agent reaches its tools through MCP servers: DocQuery's own document search server and a Gmail server, both running in the backend
-- **Answer trace**: each answer can show how it was made (the action chosen, the searches run, the passages used and the tools called)
+## Features
+
+### Documents
+- **Upload** PDFs with the **+** button or by dragging them onto the page, up to 10 at a time (50 MB each by default)
+- **Attach and ask in one message**: the question is answered from the attached files only
+- **Background reading**: a PDF is saved at once and read in the background; a card in the chat shows *Reading…* and then *Ready*, or a clear reason if the file could not be read
+- **Duplicate detection**: the same file (by content) is never stored twice
+- **My documents** panel: open or delete any document (its stored PDF and all its data are removed), newest first
+
+### Questions and answers
+- **Ask across all documents** and get answers with **source chips** showing the document and pages (for example `report.pdf · p. 4, 7`)
+- **Tables and key details** ("show the invoice items as a table", "items with quantity above 100"): shown as tables, with copy and CSV download
+- **Summaries** of one document, and a short **overview** of several
+- **List** your documents, or ask "which document talks about glaciers?"
+- **"The documents I just uploaded"** is understood and covers only those files
+- **Honest answers**: when the documents don't contain the answer, it says so instead of guessing
+
+### Nepali documents
+- **Scanned Nepali pages** are read with Nepali + English OCR; English pages are not affected
+- **Old Preeti-font PDFs**, whose copied text reads as `g]kfn` instead of `नेपाल`, are read with OCR instead
+- **Nepali keyword search** handles word endings (`विद्यार्थी` also finds `विद्यार्थीहरूको`)
+- **Answers follow the language of the question**, and an English question about a Nepali document (or the other way round) searches in both languages
+
+### Conversation
+- **Small talk** is answered without searching the documents
+- **Follow-ups**: "make it shorter", "in simple words", "as bullet points" reword the last answer; "make it longer" and "give an example" search again for more
+- **Conversation memory** within the chat: details you state ("I am Seema") are remembered
+- **Saved chat history** per user, available on any device, with **Clear chat** (asks before deleting)
+
+### Accounts
+- Sign up and log in with email and password, or **continue with Google**
+- Each user only sees their own documents, chat and Gmail
+
+### Gmail (optional)
+- **Connect Gmail** (read-only) from the header, then ask: "emails from Ashok this week", "read the latest invoice email"
+- Emails are shown as **email cards** with dates in your own time zone
+- **Import a PDF attachment** into your documents and ask questions about it like any uploaded file
 
 ---
 
 ## How it works
 
-The system follows a RAG pipeline, with an agent layer on top that decides how to handle each message:
+DocQuery follows a RAG pipeline, with an agent layer that decides how to handle each message.
 
 ```
-PDF Upload  (duplicate check by SHA-256, file stored, answered immediately)
+PDF upload  (duplicate check by SHA-256, file stored, answered immediately)
    │
    ▼  background thread (one PDF at a time, the others wait their turn)
-Extraction  ──►  Text layer (PyMuPDF) + tables (pdfplumber);
-                 Tesseract OCR only for pages with no text layer
-                 (picture-only pages are read several at a time;
-                 Devanagari pages are read as Nepali + English)
+Extraction  ──►  Text layer (PyMuPDF) + tables (pdfplumber)
+                 Tesseract OCR for pages with no readable text layer
+                 (several pages at a time; Devanagari pages read as Nepali + English)
    │
    ▼
-Chunking (LangChain, heading-aware)  ──►  Overlapping segments, split at section headings,
-   │                                      each chunk remembers its page number
-   ▼
-Embedding (multilingual-e5-base)  ──►  Each chunk converted into a vector
+Chunking (LangChain, heading-aware)  ──►  Overlapping segments, each remembers its page
    │
    ▼
-Storage (PostgreSQL + pgvector)  ──►  Chunks, vectors and pages stored per user
+Embedding (multilingual-e5-base)  ──►  Each chunk becomes a 768-number vector
    │
    ▼
-─────────────── on each question ───────────────
+Storage (PostgreSQL + pgvector)  ──►  Chunks, vectors and pages, stored per user
    │
    ▼
-Agent (intent routing)  ──►  LIST / SUMMARY / OVERVIEW / TABLE / CHAT / SEARCH
+──────────────────── on each question ────────────────────
+   │
+   ▼
+Agent (intent routing)  ──►  SEARCH / TABLE / SUMMARY / OVERVIEW / LIST / EMAIL / CHAT
    │                          (follow-ups and conversation memory are handled first)
    ▼
-SEARCH: agent loop  ──►  The model calls a search tool (up to 4 times)
-   │                      Hybrid retrieval: vector search + keyword search, merged
+MCP tools  ──►  search_documents (DocQuery server) · Gmail tools (Gmail server)
+   │             Hybrid retrieval: vector + keyword search, merged by rank (RRF)
    ▼
-Answer (Groq, or Ollama as fallback)  ──►  Grounded in the retrieved passages, with sources and pages
+Answer (Groq, Ollama as fallback)  ──►  Grounded in the passages, with sources and pages
 ```
 
-### The Agent layer
+### Intent routing
 
-Every message is classified into one of seven actions before anything else happens. Simple rules handle the clear cases, and the language model only decides between chat and search.
+Every message is classified before anything else happens. Simple rules handle the clear cases, and the language model only decides between chat and search.
 
-| Action | Trigger | Behavior |
+| Action | Example | What happens |
 |---|---|---|
-| `SEARCH` | A specific question about the documents | Agent loop with hybrid retrieval, then a grounded answer with sources and pages |
-| `TABLE` | "Show ... as a table", "items where ...", "list the rows" | Extracts a table or key-value pairs in a fixed JSON structure, exactly as written |
-| `SUMMARY` | "Summarize the story / this document" | Reads the whole document in order and writes a short summary |
-| `OVERVIEW` | "Overview of all documents", "summarize these two documents" | One or two sentences about each document |
-| `LIST` | "What documents do you have?" | Returns the list of uploaded documents |
-| `EMAIL` | A request about your Gmail ("emails from ...", "import the attachment") | Agent loop with the Gmail MCP tools: search emails, read one, import a PDF attachment |
-| `CHAT` | Greetings, small talk, facts about you, "what are we talking about?" | Responds conversationally without touching the documents |
+| `SEARCH` | "What is the due date?" | Agent loop with hybrid retrieval, then a grounded answer with sources |
+| `TABLE` | "Show the items as a table" | Extracts a table or key-value pairs exactly as written |
+| `SUMMARY` | "Summarize this document" | Reads the whole document in order and writes a short summary |
+| `OVERVIEW` | "Summarize these two documents" | One or two sentences about each document |
+| `LIST` | "What documents do you have?" | Lists the uploaded documents |
+| `EMAIL` | "Emails from Ashok this week" | Agent loop with the Gmail MCP tools |
+| `CHAT` | "Hi, how are you?" | A conversational reply, no document search |
 
-**MCP tools.** The agent does not call the search code directly. It is an MCP client (`mcp_client.py`) that connects to two MCP servers mounted in the backend over Streamable HTTP: DocQuery (`/mcp`, document search) and Gmail (`/gmail-mcp`, `search_emails`, `read_email`, `import_email_attachment`). It asks each server for its tools and gives them to the model, and only the tools offered for that request can be run. Each call carries the user's login token, so a tool only sees that user's documents and Gmail.
+### MCP tools
 
-**Agentic search.** In `SEARCH` the model is given a `search_documents` tool. The first search is always forced, so it can never answer from general knowledge. It sees which documents contain relevant passages and can search again inside each one, so a question touching several documents doesn't lose one. If the passages don't state the answer, the model says it couldn't find it.
+The agent is an MCP client (`mcp_client.py`). It connects to two MCP servers mounted in the backend over Streamable HTTP, asks each for its tools and gives them to the model:
 
-**Hybrid retrieval.** Meaning-based (vector) search and keyword (full-text) search are merged by rank, so both paraphrased questions and exact words, numbers and IDs are found.
+| Server | Address | Tools |
+|---|---|---|
+| DocQuery | `/mcp` | `search_documents`, `list_my_documents` |
+| Gmail | `/gmail-mcp` | `search_emails`, `read_email`, `import_email_attachment` |
 
-**Follow-ups and memory.** Short messages made only of follow-up words ("make it shorter", "give me an example then") are recognised and handled before routing. The assistant keeps simple notes of what you told it (rule-based, no extra model call) and the last few turns of the chat, which are sent along with each question.
+Only the tools offered for that request can run, and every call carries the user's login token, so a tool only sees that user's documents and Gmail.
 
-**Model fallback.** Groq (`openai/gpt-oss-120b`) is used when `LLM_PROVIDER=groq`. If Groq hits a rate limit or errors, search requests fall back to the local Ollama model. Table requests don't fall back (the small model isn't reliable for tables) and show a short "usage limit reached" message.
+### Agentic search and hybrid retrieval
 
-**Nepali documents.** Before a scanned page is read, Tesseract checks which script it is written in. Devanagari pages are read with Nepali + English (Nepali documents often contain English words, emails and numbers); all other pages are read in English only, so English documents are not affected. Pages typed in old Nepali fonts such as Preeti, whose text layer reads as `g]kfn` instead of `नेपाल`, are read with OCR instead of from the text layer. Keyword search also understands Nepali words and their endings (a question about `विद्यार्थी` also finds `विद्यार्थीहरूको`). The answer trace shows which pages were read as Nepali.
+The first search is always forced, so the model never answers from general knowledge. It sees which documents hold relevant passages and can search inside each one again (up to 3 searches), so a question touching several documents doesn't lose one. Vector search and PostgreSQL full-text search are merged with Reciprocal Rank Fusion (k = 60). The model lists the passages it used, and those become the answer's sources.
 
-**Background reading.** `POST /upload` saves the file and returns at once. A background thread reads it (one PDF at a time, the others queue). The page checks the status until the file is ready or has failed. The jobs are kept in memory, so a file that is still being read when the backend restarts has to be uploaded again.
+### Nepali OCR
+
+Before a scanned page is read, Tesseract checks its script. Devanagari pages are read with Nepali + English, and all other pages with English only, so English documents give exactly the same text as before. Pages typed in old Nepali fonts (Preeti, Kantipur and similar) are read with OCR instead of from their text layer. Without Tesseract's Nepali data, or with `NEPALI_OCR=0`, every page is read in English.
+
+### Answer trace
+
+Each answer records its steps: the model calls, the intent, the tools called through MCP, the searches (with the vector, keyword and merged rankings), the passages given to the model and how each document was read (text layer or OCR, and which pages as Nepali). The chat shows this under **How this answer was found**.
+
+### Model fallback
+
+With `LLM_PROVIDER=groq`, Groq (`openai/gpt-oss-120b`) answers. If Groq hits a rate limit or an error, search answers fall back to the local Ollama model (`llama3.2:3b`). Table requests don't fall back (the small model isn't reliable for tables) and show a short "usage limit reached" message instead.
 
 ---
 
@@ -116,14 +164,16 @@ Every message is classified into one of seven actions before anything else happe
 | Layer | Technology |
 |---|---|
 | Backend API | Python, FastAPI |
-| PDF parsing | PyMuPDF, pdfplumber, Tesseract OCR (pytesseract) |
+| PDF reading | PyMuPDF, pdfplumber, Tesseract OCR (pytesseract), English and Nepali |
 | Text chunking | LangChain text splitters |
 | Embeddings | `intfloat/multilingual-e5-base` (Sentence Transformers) |
-| Storage and search | PostgreSQL + pgvector, PostgreSQL full-text search |
-| Language models | Groq `openai/gpt-oss-120b` and Ollama `llama3.2:3b` |
+| Storage and search | PostgreSQL, pgvector, PostgreSQL full-text search |
+| Language models | Groq `openai/gpt-oss-120b`, Ollama `llama3.2:3b` |
+| Agent tools | MCP Python SDK (MCP servers and client, Streamable HTTP) |
 | Authentication | JWT (python-jose), bcrypt (passlib), Google sign-in (google-auth) |
-| Integration | MCP Python SDK (DocQuery and Gmail MCP servers), Gmail API |
-| Frontend | Next.js (TypeScript, App Router, Tailwind CSS), `@react-oauth/google` |
+| Gmail | Gmail API, Google OAuth 2.0 (read-only), Fernet encryption |
+| Frontend | Next.js, TypeScript, Tailwind CSS, `@react-oauth/google` |
+| Deployment | Docker, Docker Compose |
 
 ---
 
@@ -132,123 +182,107 @@ Every message is classified into one of seven actions before anything else happe
 ```
 rag-assistant-tool/
 ├── backend/
-│   ├── main.py          # FastAPI app and endpoints, mounts the MCP servers
-│   ├── pipeline.py      # Core pipeline: extraction, chunking, embedding, retrieval,
-│   │                    # agent routing, agent loops, follow-ups, tables, summaries
-│   ├── ingest.py        # Adding a PDF: saving it and reading it in the background
-│   ├── mcp_client.py    # The agent's MCP client: lists and calls the servers' tools
-│   ├── docquery_mcp.py  # DocQuery MCP server (document search)
-│   ├── gmail_mcp.py     # Gmail MCP server (search, read, import attachment)
-│   ├── gmail_account.py # Connecting Gmail (Google OAuth) and calling the Gmail API
-│   ├── answer_trace.py  # Records how each answer was made
-│   ├── llm.py           # Groq / Ollama switch with automatic fallback
-│   ├── auth.py          # Password hashing and JWT helpers
+│   ├── main.py             # FastAPI app and endpoints; mounts the MCP servers
+│   ├── pipeline.py         # Extraction, OCR, chunking, embedding, retrieval,
+│   │                       # intent routing, agent loops, follow-ups, tables, summaries
+│   ├── ingest.py           # Adding a PDF: saving it and reading it in the background
+│   ├── mcp_client.py       # The agent's MCP client: lists and calls the servers' tools
+│   ├── docquery_mcp.py     # DocQuery MCP server (document search)
+│   ├── gmail_mcp.py        # Gmail MCP server (search, read, import attachment)
+│   ├── gmail_account.py    # Connecting Gmail (Google OAuth) and calling the Gmail API
+│   ├── answer_trace.py     # Records how each answer was made
+│   ├── llm.py              # Groq / Ollama switch with automatic fallback
+│   ├── auth.py             # Password hashing and JWT helpers
 │   ├── requirements.txt
-│   ├── uploads/         # Stored PDFs, one folder per user (created automatically, not in git)
-│   └── .env             # Database password, model settings, API keys (not in git)
-└── frontend/
-    ├── app/page.tsx                   # Chat interface, tables, file cards, source chips, documents panel
-    ├── app/globals.css                # Colours and small animations
-    ├── app/components/AuthModal.tsx   # Login, signup and Google sign-in window
-    └── app/components/AnswerTrace.tsx # "How this answer was made" panel
+│   ├── Dockerfile
+│   ├── uploads/            # Stored PDFs, one folder per user (created automatically, not in git)
+│   └── .env                # Your settings and keys (not in git)
+├── frontend/
+│   ├── app/page.tsx                    # Chat, file cards, source chips, tables, documents panel
+│   ├── app/components/AuthModal.tsx    # Login, sign-up and Google sign-in window
+│   ├── app/components/AnswerTrace.tsx  # "How this answer was found" panel
+│   ├── app/config.ts                   # Where the backend runs
+│   ├── app/globals.css                 # Colours and small animations
+│   └── Dockerfile
+├── db/
+│   └── init.sql            # Database tables (used by Docker and for a local setup)
+├── docker-compose.yml      # Database, backend and frontend
+└── docker-compose.dev.yml  # Development override (live reload)
 ```
-
-### API endpoints
-
-| Endpoint | Purpose |
-|---|---|
-| `POST /signup`, `POST /login` | Create an account / get a token |
-| `POST /auth/google` | Sign in with a Google account (creates the account the first time) |
-| `POST /upload` | Save a PDF and start reading it in the background (requires login) |
-| `GET /upload/status` | How the background reading is going (one entry per file) |
-| `POST /query` | Ask a question |
-| `GET /gmail/status`, `POST /gmail/connect`, `DELETE /gmail` | Gmail connection: check it, start it, remove it |
-| `GET /gmail/callback` | Where Google sends the user back after allowing Gmail access |
-| `/mcp`, `/gmail-mcp` | The DocQuery and Gmail MCP servers used by the agent |
-| `GET /documents` | List the signed-in user's documents, newest first |
-| `DELETE /documents?name=` | Delete a document and its stored PDF |
-| `GET /documents/file?name=` | Open the stored PDF |
-| `GET /chat`, `PUT /chat`, `DELETE /chat` | Load, save and clear the saved chat |
 
 ---
 
-## Setup
+## Getting started
 
-### Prerequisites
+### Option A: Docker
 
-- Python 3.10+
-- Node.js 18+
-- PostgreSQL 15+ with the [pgvector](https://github.com/pgvector/pgvector) extension installed
-- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) installed and on your system PATH, with the **Nepali** (`nep`) and **OSD** (`osd`) language data for Nepali documents (check with `tesseract --list-langs`). Without them, every page is read in English
-- [Ollama](https://ollama.com) installed, with the `llama3.2:3b` model pulled (used locally and as the fallback):
+The quickest way to run everything (database, backend and frontend). You need [Docker Desktop](https://www.docker.com/products/docker-desktop/) and, for the local fallback model, [Ollama](https://ollama.com) running on your computer.
+
+1. Create `backend/.env` (see [Environment variables](#environment-variables)). At least `DB_PASSWORD` and `JWT_SECRET_KEY` are needed.
+2. From the project folder:
+   ```bash
+   docker compose --env-file backend/.env up --build
+   ```
+3. Open `http://localhost:3000`
+
+Docker uses its own empty database, created from `db/init.sql` the first time it starts. The image includes Tesseract with the English and Nepali data. The first start downloads the embedding model (about 1 GB), which is then kept in a Docker volume.
+
+To work on the code inside Docker with live reload:
+```bash
+docker compose --env-file backend/.env -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+### Option B: Run locally
+
+#### Prerequisites
+
+- Python 3.10 or newer
+- Node.js 18 or newer
+- PostgreSQL 15 or newer with the [pgvector](https://github.com/pgvector/pgvector) extension
+- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) on your system PATH, with the **Nepali** (`nep`) and **OSD** (`osd`) language data for Nepali documents. Check with:
+  ```bash
+  tesseract --list-langs
+  ```
+- [Ollama](https://ollama.com) with the local model:
   ```bash
   ollama pull llama3.2:3b
   ```
-- A [Groq](https://console.groq.com) API key (optional; without it, use `LLM_PROVIDER=ollama`)
-- A Google OAuth client ID (optional; only needed for "Continue with Google", see below)
+- A [Groq API key](https://console.groq.com) (optional; without one, set `LLM_PROVIDER=ollama`)
 
-### Backend
+#### 1. Database
+
+```bash
+psql -U postgres -c "CREATE DATABASE document_query_db;"
+psql -U postgres -d document_query_db -f db/init.sql
+```
+
+`db/init.sql` creates the pgvector extension and every table: `users`, `document_chunks`, `document_info`, `chat_history` and `gmail_accounts`.
+
+#### 2. Backend
 
 ```bash
 cd backend
 python -m venv venv
-venv\Scripts\activate        # Windows
+venv\Scripts\activate          # Windows
+# source venv/bin/activate     # macOS / Linux
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in `backend/`:
+Create `backend/.env`:
 ```
 DB_PASSWORD=your_postgres_password
-LLM_PROVIDER=groq            # or ollama
-GROQ_API_KEY=your_groq_api_key
-GROQ_MODEL=openai/gpt-oss-120b
 JWT_SECRET_KEY=a_long_random_secret_string
-GOOGLE_CLIENT_ID=your_google_oauth_client_id.apps.googleusercontent.com
-OCR_WORKERS=4                # optional: how many picture-only pages are read at the same time
-NEPALI_OCR=1                 # optional: 0 reads every scanned page in English only
-```
-Login tokens are valid for 7 days. `OCR_WORKERS` defaults to the number of CPU cores, up to 4.
-
-Set up the database:
-```sql
-CREATE DATABASE document_query_db;
-\c document_query_db
-CREATE EXTENSION IF NOT EXISTS vector;
-
-CREATE TABLE users (
-    id SERIAL PRIMARY KEY,
-    email TEXT UNIQUE NOT NULL,
-    password_hash TEXT              -- empty for accounts created with Google
-);
-
-CREATE TABLE document_chunks (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id),
-    source_file TEXT NOT NULL,
-    page_number INTEGER,
-    chunk_text TEXT NOT NULL,
-    embedding VECTOR(768),
-    content_hash TEXT,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_chunks_fts ON document_chunks
-    USING GIN (to_tsvector('english', chunk_text));
-
-CREATE TABLE chat_history (
-    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    messages JSONB NOT NULL DEFAULT '[]',
-    updated_at TIMESTAMP DEFAULT NOW()
-);
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_groq_api_key
 ```
 
-Run the API:
+Start the API:
 ```bash
 uvicorn main:app --reload
 ```
-The API will be available at `http://127.0.0.1:8000`, with interactive docs at `/docs`.
+The API runs at `http://127.0.0.1:8000`, with interactive docs at `http://127.0.0.1:8000/docs`.
 
-### Frontend
+#### 3. Frontend
 
 ```bash
 cd frontend
@@ -257,53 +291,112 @@ npm run dev
 ```
 Open `http://localhost:3000`.
 
+### Environment variables
+
+Backend settings go in `backend/.env`.
+
+| Variable | Required | Default | What it does |
+|---|---|---|---|
+| `DB_PASSWORD` | Yes | | PostgreSQL password |
+| `JWT_SECRET_KEY` | Yes | | Secret used to sign login tokens (also protects the stored Gmail key). Changing it logs everyone out |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` | No | `localhost`, `5432`, `document_query_db`, `postgres` | Database connection |
+| `LLM_PROVIDER` | No | `ollama` | `groq` or `ollama` |
+| `GROQ_API_KEY` | With Groq | | Groq API key |
+| `GROQ_MODEL` | No | `openai/gpt-oss-120b` | Groq model |
+| `OLLAMA_MODEL` | No | `llama3.2:3b` | Local model, also the fallback |
+| `OCR_WORKERS` | No | CPU cores, up to 4 | How many scanned pages are read at the same time |
+| `NEPALI_OCR` | No | `1` | `0` reads every scanned page in English only |
+| `MAX_UPLOAD_MB` | No | `50` | Largest PDF accepted |
+| `CORS_ORIGINS` | No | `http://localhost:3000` | Frontend addresses allowed to call the API (comma separated) |
+| `GOOGLE_CLIENT_ID` | For Google | | Google sign-in and Gmail |
+| `GOOGLE_CLIENT_SECRET` | For Gmail | | Gmail connection |
+| `GMAIL_REDIRECT_URI` | No | `http://127.0.0.1:8000/gmail/callback` | Where Google returns after allowing Gmail |
+| `FRONTEND_URL` | No | `http://localhost:3000` | Where the backend sends the browser back after connecting Gmail |
+
+Frontend settings go in `frontend/.env.local`.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `NEXT_PUBLIC_API_URL` | `http://127.0.0.1:8000` | Where the backend runs |
+| `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | | Google sign-in (same value as `GOOGLE_CLIENT_ID`) |
+
+Login tokens are valid for 7 days.
+
 ### Google sign-in (optional)
 
 1. In the [Google Cloud console](https://console.cloud.google.com/apis/credentials), create an **OAuth client ID** of type *Web application*
 2. Add `http://localhost:3000` under *Authorized JavaScript origins*
-3. Put the client ID in `backend/.env` as `GOOGLE_CLIENT_ID`, and in `frontend/.env.local` as `NEXT_PUBLIC_GOOGLE_CLIENT_ID` (the same value; the public client ID is not a secret)
+3. Put the client ID in `backend/.env` as `GOOGLE_CLIENT_ID` and in `frontend/.env.local` as `NEXT_PUBLIC_GOOGLE_CLIENT_ID` (the client ID is public, not a secret)
 
-The backend checks the Google token with `google-auth`. An account created with Google has no password, so it signs in with Google only.
+The backend verifies the Google token with `google-auth`. An account created with Google has no password, so it signs in with Google only.
 
 ### Gmail (optional)
 
 1. In the same Google Cloud project, enable the **Gmail API**
-2. On the **OAuth consent screen**, add the `gmail.readonly` scope, and while the app is in *Testing*, add each Gmail address that will be used under **Test users** (up to 100)
+2. On the **OAuth consent screen**, add the `gmail.readonly` scope. While the app is in *Testing*, add each Gmail address that will be used under **Test users** (up to 100)
 3. In the OAuth client, add `http://127.0.0.1:8000/gmail/callback` under *Authorized redirect URIs*, and copy the client secret
 4. Add to `backend/.env`:
-```
-GOOGLE_CLIENT_SECRET=your_google_oauth_client_secret
-GMAIL_REDIRECT_URI=http://127.0.0.1:8000/gmail/callback
-FRONTEND_URL=http://localhost:3000
-```
+   ```
+   GOOGLE_CLIENT_SECRET=your_google_oauth_client_secret
+   GMAIL_REDIRECT_URI=http://127.0.0.1:8000/gmail/callback
+   FRONTEND_URL=http://localhost:3000
+   ```
 5. Restart the backend and click **Connect Gmail** in the header
-
-DocQuery only asks for read-only access, so it can never send, change or delete emails. The Google key is stored encrypted. While the Google app is in *Testing*, Google ends the connection after 7 days and it has to be connected again.
 
 ---
 
 ## Usage
 
-1. Open the app, sign up or log in (or continue with Google)
-2. Click **+** to attach one or more PDFs. Send them with a question, or with no question and wait for the file card to show **Ready**
-3. Ask questions in the chat box. Try things like:
-   - A specific question ("What is the due date and payment term?")
-   - A table request ("Show all items with quantity above 100")
+1. Open the app and sign up, log in or continue with Google
+2. Click **+** (or drag PDFs onto the page) to attach documents. Send them with a question, or on their own and wait for **Ready**
+3. Type a question and press **Enter** to send (**Shift + Enter** starts a new line). Try:
+   - A direct question: "What is the due date and the payment term?"
+   - A table: "Show all items with quantity above 100"
    - "Summarize the story" or "Summarize these two documents I just uploaded"
    - "Which document talks about glaciers?"
-   - "What documents do you have?"
+   - In Nepali: "छात्रवृत्ति पाउने विद्यार्थीहरूको नाम के हो?"
    - A follow-up: "make it shorter", "give me an example", "as bullet points"
-   - A casual message ("Hi, I am Seema"), and later "who am I?"
-4. Click a source chip under an answer to open the PDF at that page. Use **My documents** to open or delete a document, and the account menu to clear the chat or log out
+   - With Gmail connected: "emails with a PDF attached this week", then "import that PDF"
+4. Click a source chip to open the PDF at that page, and **How this answer was found** to see the steps
+5. Use **My documents** to open or delete a document, and the account menu to clear the chat or log out
+
+---
+
+## API reference
+
+| Endpoint | Login | Purpose |
+|---|---|---|
+| `POST /signup`, `POST /login` | No | Create an account / log in; returns a token |
+| `POST /auth/google` | No | Sign in with Google (creates the account the first time) |
+| `POST /upload` | Yes | Save a PDF and start reading it in the background |
+| `GET /upload/status?ids=` | Yes | Progress of the background reading |
+| `POST /query` | Optional | Ask a question (documents need a login; small talk works without) |
+| `GET /documents` | Yes | The user's documents, newest first |
+| `GET /documents/file?name=` | Yes | Open the stored PDF |
+| `DELETE /documents?name=` | Yes | Delete a document and its stored PDF |
+| `GET /chat`, `PUT /chat`, `DELETE /chat` | Yes | Load, save and clear the saved chat |
+| `GET /gmail/status`, `POST /gmail/connect`, `DELETE /gmail` | Yes | Check, start and remove the Gmail connection |
+| `GET /gmail/callback` | No | Where Google returns after the permission screen |
+| `/mcp`, `/gmail-mcp` | Token | The DocQuery and Gmail MCP servers used by the agent |
+
+---
+
+## Security and privacy
+
+- Passwords are hashed with bcrypt; logins use signed JWT tokens that expire after 7 days
+- Every document, chunk, stored PDF, saved chat and Gmail connection belongs to one user, and every query is filtered by that user
+- MCP tools take the user from the login token sent with each call, never from what the model writes
+- Gmail access is **read-only** (`gmail.readonly`): DocQuery can never send, change or delete emails. The Google refresh token is stored encrypted, and **Disconnect Gmail** also cancels the access at Google
+- Email text is treated as data, never as instructions to the assistant
+- `backend/.env`, `frontend/.env.local` and `backend/uploads/` are kept out of git
 
 ---
 
 ## Known limitations
 
-- Scanned (image-only) PDFs depend on OCR, which can misread digits. Nepali OCR can misread some joined letters, and very short Nepali pages may be read as English. Text-based PDFs are read exactly. Picture-only pages in a very large PDF take longer to read
-- Very long tables can lose rows, and rows split across a page break may be read as two rows
-- Groq's free tier has limits (about 8,000 tokens per minute and 200,000 per day). When reached, search answers come from the smaller local model and table requests are unavailable until the limit resets
-- Conversation memory is rule-based and keeps simple facts the user states, not everything said
-- Background reading jobs are kept in memory: if the backend restarts while a file is being read, the file has to be uploaded again
-- Counting questions ("how many times does X appear?") depend on the passages found and may be incomplete
-- While the Google app is in Testing mode, a Gmail connection lasts 7 days and only listed test users can connect
+- **OCR accuracy on scanned documents.** Results depend on scan quality: digits and some joined Nepali letters can be misread, including certain digits in Preeti-font documents. Text-based PDFs are read exactly.
+- **Very short scanned pages.** A page with only a few words may be too short for script detection and is then read in English.
+- **Long or complex tables.** Very long tables may lose rows, and a row that continues on the next page may be read as two rows.
+- **Groq usage limits.** On the free tier (about 8,000 tokens per minute and 200,000 per day), search answers fall back to the local model and table extraction is paused until the limit resets.
+- **Conversation memory.** Only simple facts the user states, such as their name, are remembered, not the full conversation.
+- **Gmail in testing mode.** While the Google app is unverified, a connection expires after 7 days and only registered test users (up to 100) can connect.
